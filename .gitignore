@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.claude_resources.json
+AGENTS.md
+.codex/
+
+# Keep only the verified full-task checkpoint in Git. Intermediate PPO
+# checkpoints and TensorBoard logs are reproducible but unnecessarily large.
+runs/*
+!runs/b2w_z1_pull_door_ppo/
+runs/b2w_z1_pull_door_ppo/*
+!runs/b2w_z1_pull_door_ppo/full/
+runs/b2w_z1_pull_door_ppo/full/*
+!runs/b2w_z1_pull_door_ppo/full/best_success/
+runs/b2w_z1_pull_door_ppo/full/best_success/*
+!runs/b2w_z1_pull_door_ppo/full/best_success/best_success_model.zip
+!runs/b2w_z1_pull_door_ppo/full/best_success/vecnormalize.pkl
+videos/
+*.mp4

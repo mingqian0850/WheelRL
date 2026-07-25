@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wheelrl"
+version = "0.1.0"
+description = "MuJoCo RL environment for a Unitree B2-W with a Z1 arm and gripper"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+dependencies = [
+  "gymnasium>=1.2,<2",
+  "mujoco>=3.3.6,<4",
+  "numpy>=1.26,<3",
+  "psutil>=7",
+  "stable-baselines3[extra]>=2.8,<3",
+  "torch>=2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+wheelrl-check = "wheelrl.check_env:main"
+wheelrl-check-door = "wheelrl.check_door:main"
+wheelrl-eval-door = "wheelrl.eval_door:main"
+wheelrl-play = "wheelrl.play:main"
+wheelrl-play-door = "wheelrl.play_door:main"
+wheelrl-train = "wheelrl.train:main"
+wheelrl-train-door = "wheelrl.train_door:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wheelrl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# WSL inherits TEMP/TMP paths on the Windows mount. Pytest's file-backed
+# capture can disappear underneath it there, so keep tests capture-free.
+addopts = "-q -s"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

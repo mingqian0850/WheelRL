@@ -21,6 +21,16 @@ command the B2-W backward while pulling the door open.
 The final action component controls the gripper: `-1` is fully open
 (`-pi/2 rad`) and `+1` is fully closed (`0 rad`).
 
+## RL / DRL tutorial
+
+The repository includes a Chinese, project-oriented
+[reinforcement-learning tutorial](tutorials/rl/README.md). It derives the path
+from MDPs and Bellman equations through DQN, policy gradients, GAE, PPO, TD3,
+and SAC, then maps the formulas back to WheelRL's observations, actions,
+reward design, curriculum, domain randomization, and evaluation protocol.
+Runnable minimal examples and a license-checked open-source reading map are
+included.
+
 ## WSL setup
 
 From this project directory:

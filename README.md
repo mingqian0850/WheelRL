@@ -121,6 +121,16 @@ error. MuJoCo keeps exclusive ownership of its keyboard shortcuts, so camera,
 pause, help, and visualization controls no longer conflict with robot commands.
 The yellow/red-green-blue triad in MuJoCo is the commanded Z1 TCP pose.
 
+The browser also changes real robot motion limits while the simulation runs:
+
+- `Precision` (`0.4x`): 2 mm / 0.5 degree jogs for grasp and contact work;
+- `Normal` (`1x`): 1 cm / 2 degree jogs;
+- `Fast` (up to `2x`, rotation `1.5x`): 3 cm / 5 degree jogs for large moves.
+
+The profile scales TCP, base, and WBC joint velocities. It is separate from
+MuJoCo's playback-speed control. Set the initial profile without the browser
+with `wheelrl-play-wbc --speed-profile fast`.
+
 If the browser cannot be opened automatically, visit the printed URL (normally
 `http://127.0.0.1:8765/`). Choose a free port automatically with
 `--panel-port 0`, or suppress automatic browser launch with

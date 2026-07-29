@@ -12,13 +12,17 @@ import numpy as np
 
 from wheelrl.control_panel import WBCControlPanel
 from wheelrl.wbc import (
+    SPEED_PROFILE_SCALES,
     WBC_MODEL_PATH,
     B2WZ1WholeBodyController,
     rotation_rpy,
 )
 
-TRANSLATION_STEP = 0.01
-ROTATION_STEP = np.deg2rad(2.0)
+JOG_STEPS = {
+    "precision": (0.002, np.deg2rad(0.5)),
+    "normal": (0.010, np.deg2rad(2.0)),
+    "fast": (0.030, np.deg2rad(5.0)),
+}
 
 
 def _print_pose(controller: B2WZ1WholeBodyController) -> None:
@@ -30,6 +34,9 @@ def _print_pose(controller: B2WZ1WholeBodyController) -> None:
         f"position_error={diagnostics.position_error:.4f} m "
         f"orientation_error={np.rad2deg(diagnostics.orientation_error):.2f} deg "
         f"upright={diagnostics.upright:.3f} "
+        f"speed={controller.speed_profile}"
+        f"({controller.speed_scale:.2f}x/"
+        f"{controller.rotation_speed_scale:.2f}x-rot) "
         f"auto_drive={'on' if diagnostics.mobile_base_active else 'off'} "
         f"base_goal={diagnostics.base_goal_distance:.3f} m"
     )
@@ -41,21 +48,22 @@ def _handle_key(key: int, controller: B2WZ1WholeBodyController) -> None:
     except ValueError:
         return
 
+    translation_step, rotation_step = JOG_STEPS[controller.speed_profile]
     translations = {
-        "W": np.array([TRANSLATION_STEP, 0.0, 0.0]),
-        "S": np.array([-TRANSLATION_STEP, 0.0, 0.0]),
-        "A": np.array([0.0, TRANSLATION_STEP, 0.0]),
-        "D": np.array([0.0, -TRANSLATION_STEP, 0.0]),
-        "R": np.array([0.0, 0.0, TRANSLATION_STEP]),
-        "F": np.array([0.0, 0.0, -TRANSLATION_STEP]),
+        "W": np.array([translation_step, 0.0, 0.0]),
+        "S": np.array([-translation_step, 0.0, 0.0]),
+        "A": np.array([0.0, translation_step, 0.0]),
+        "D": np.array([0.0, -translation_step, 0.0]),
+        "R": np.array([0.0, 0.0, translation_step]),
+        "F": np.array([0.0, 0.0, -translation_step]),
     }
     rotations = {
-        "U": (np.array([1.0, 0.0, 0.0]), ROTATION_STEP),
-        "O": (np.array([1.0, 0.0, 0.0]), -ROTATION_STEP),
-        "I": (np.array([0.0, 1.0, 0.0]), ROTATION_STEP),
-        "K": (np.array([0.0, 1.0, 0.0]), -ROTATION_STEP),
-        "J": (np.array([0.0, 0.0, 1.0]), ROTATION_STEP),
-        "L": (np.array([0.0, 0.0, 1.0]), -ROTATION_STEP),
+        "U": (np.array([1.0, 0.0, 0.0]), rotation_step),
+        "O": (np.array([1.0, 0.0, 0.0]), -rotation_step),
+        "I": (np.array([0.0, 1.0, 0.0]), rotation_step),
+        "K": (np.array([0.0, 1.0, 0.0]), -rotation_step),
+        "J": (np.array([0.0, 0.0, 1.0]), rotation_step),
+        "L": (np.array([0.0, 0.0, 1.0]), -rotation_step),
     }
     if letter in translations:
         controller.nudge_position_base(translations[letter])
@@ -106,6 +114,11 @@ def _apply_panel_command(
         if not isinstance(enabled, bool):
             raise ValueError("auto_drive enabled must be a boolean")
         controller.auto_drive = enabled
+    elif action == "speed_profile":
+        profile = command.get("profile")
+        if not isinstance(profile, str):
+            raise ValueError("speed profile must be a string")
+        controller.set_speed_profile(profile)
     elif action == "print_pose":
         _print_pose(controller)
     elif action == "quit":
@@ -133,6 +146,9 @@ def _panel_state(controller: B2WZ1WholeBodyController) -> dict[str, Any]:
         "base_goal_distance": diagnostics.base_goal_distance,
         "gripper_closed": controller.gripper_closed,
         "auto_drive": controller.auto_drive,
+        "speed_profile": controller.speed_profile,
+        "speed_scale": controller.speed_scale,
+        "rotation_speed_scale": controller.rotation_speed_scale,
     }
 
 
@@ -152,6 +168,9 @@ def _viewer_overlay(
         "Base       "
         + ("moving" if diagnostics.mobile_base_active else "arm workspace"),
         "Gripper    " + ("closed" if controller.gripper_closed else "open"),
+        f"Speed      {controller.speed_profile} "
+        f"({controller.speed_scale:.2f}x, "
+        f"rot {controller.rotation_speed_scale:.2f}x)",
     ]
     texts = [
         (
@@ -198,6 +217,12 @@ def main() -> None:
     parser.add_argument("--settle-seconds", type=float, default=2.0)
     parser.add_argument("--control-hz", type=float, default=100.0)
     parser.add_argument("--base-assist", type=float, default=0.25)
+    parser.add_argument(
+        "--speed-profile",
+        choices=tuple(SPEED_PROFILE_SCALES),
+        default="normal",
+        help="initial motion limits; the browser can change this live",
+    )
     parser.add_argument(
         "--no-auto-drive",
         action="store_true",
@@ -253,6 +278,7 @@ def main() -> None:
         control_hz=args.control_hz,
         base_assist=args.base_assist,
         auto_drive=not args.no_auto_drive,
+        speed_profile=args.speed_profile,
     )
     controller.reset()
 

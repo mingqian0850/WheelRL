@@ -41,6 +41,16 @@ WHEEL_BODIES = (
     "RL_wheel_link",
 )
 WHEEL_RADIUS = 0.10
+SPEED_PROFILE_SCALES = {
+    "precision": 0.40,
+    "normal": 1.00,
+    "fast": 2.00,
+}
+ROTATION_SPEED_PROFILE_SCALES = {
+    "precision": 0.40,
+    "normal": 1.00,
+    "fast": 1.50,
+}
 
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
@@ -135,6 +145,7 @@ class B2WZ1WholeBodyController:
         control_hz: float = 100.0,
         base_assist: float = 0.25,
         auto_drive: bool = True,
+        speed_profile: str = "normal",
     ) -> None:
         self.model = model
         self.data = data
@@ -145,6 +156,10 @@ class B2WZ1WholeBodyController:
             raise ValueError("control_hz must divide the MuJoCo simulation frequency")
         self.base_assist = float(np.clip(base_assist, 0.0, 1.0))
         self.auto_drive = auto_drive
+        self._speed_profile = ""
+        self._speed_scale = 1.0
+        self._rotation_speed_scale = 1.0
+        self.set_speed_profile(speed_profile)
 
         self._base_body_id = self._id(mujoco.mjtObj.mjOBJ_BODY, "base_link")
         self._tcp_site_id = self._id(mujoco.mjtObj.mjOBJ_SITE, "z1_ee")
@@ -246,6 +261,18 @@ class B2WZ1WholeBodyController:
     @property
     def gripper_closed(self) -> bool:
         return self._gripper_target > -0.5
+
+    @property
+    def speed_profile(self) -> str:
+        return self._speed_profile
+
+    @property
+    def speed_scale(self) -> float:
+        return self._speed_scale
+
+    @property
+    def rotation_speed_scale(self) -> float:
+        return self._rotation_speed_scale
 
     @property
     def tcp_position(self) -> FloatArray:
@@ -360,6 +387,15 @@ class B2WZ1WholeBodyController:
 
     def toggle_gripper(self) -> None:
         self.set_gripper(closed=not self.gripper_closed)
+
+    def set_speed_profile(self, profile: str) -> None:
+        """Set a safe motion-speed multiplier without changing control rate."""
+        if profile not in SPEED_PROFILE_SCALES:
+            choices = ", ".join(SPEED_PROFILE_SCALES)
+            raise ValueError(f"speed profile must be one of: {choices}")
+        self._speed_profile = profile
+        self._speed_scale = SPEED_PROFILE_SCALES[profile]
+        self._rotation_speed_scale = ROTATION_SPEED_PROFILE_SCALES[profile]
 
     def _update_target_marker(self) -> None:
         if self._target_mocap_id < 0:
@@ -535,6 +571,8 @@ class B2WZ1WholeBodyController:
                 forward,
                 base_rotation,
             )
+            desired_base_twist[:3] *= self._speed_scale
+            desired_base_twist[3:] *= self._rotation_speed_scale
             target_from_home_current = (
                 base_rotation.T @ (self._target_position - base_position)
                 - self._home_tcp_position_base
@@ -582,6 +620,8 @@ class B2WZ1WholeBodyController:
                     ),
                 ]
             )
+            desired_base_twist[:3] *= self._speed_scale
+            desired_base_twist[3:] *= self._rotation_speed_scale
             control_tcp_position = self._target_position
             control_tcp_rotation = self._target_rotation
         task_jacobians.append(
@@ -611,6 +651,8 @@ class B2WZ1WholeBodyController:
                 ),
             ]
         )
+        desired_tcp_twist[:3] *= self._speed_scale
+        desired_tcp_twist[3:] *= self._rotation_speed_scale
         task_jacobians.append(
             self._site_jacobian(self._tcp_site_id)[:, self._optimized_dofs]
         )
@@ -664,6 +706,9 @@ class B2WZ1WholeBodyController:
             + [-1.0] * 6,
             dtype=np.float64,
         )
+        lower[:3] *= self._speed_scale
+        lower[3:6] *= self._rotation_speed_scale
+        lower[6:] *= self._speed_scale
         return np.clip(generalized_velocity, lower, -lower)
 
     @staticmethod

@@ -42,6 +42,8 @@ button:hover { background: #344154; }
 button.primary { background: #2563eb; border-color: #3b82f6; }
 button.good { background: #12613b; border-color: #1a8050; }
 button.warn { background: #7a3d15; border-color: #a8561e; }
+button.selected { background: #6d28d9; border-color: #8b5cf6;
+  box-shadow: 0 0 0 1px #8b5cf6 inset; }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .toggle { margin-left: auto; display: flex; align-items: center; gap: 7px; }
 .hint { color: #98a6b5; font-size: .82rem; margin-top: 9px; }
@@ -65,6 +67,20 @@ button.warn { background: #7a3d15; border-color: #a8561e; }
 </div>
 
 <section>
+  <h2>Robot motion speed</h2>
+  <div class="actions">
+    <button id="speed-precision" onclick="setSpeed('precision')">
+      Precision · 0.4×</button>
+    <button id="speed-normal" onclick="setSpeed('normal')">
+      Normal · 1×</button>
+    <button id="speed-fast" onclick="setSpeed('fast')">
+      Fast · up to 2×</button>
+  </div>
+  <div class="hint">Changes TCP, orientation, base, joint, and jog speed.
+    It does not change MuJoCo playback speed. Use Precision near contacts.</div>
+</section>
+
+<section>
   <h2>Target offset from startup home</h2>
   <div class="pose">
     <label>X · forward (m)<input id="x" type="number" step="0.01"></label>
@@ -75,18 +91,18 @@ button.warn { background: #7a3d15; border-color: #a8561e; }
     <label>Yaw (deg)<input id="yaw" type="number" step="2"></label>
   </div>
   <div class="jog">
-    <button onclick="jog('x',.01)">Forward +X</button>
-    <button onclick="jog('x',-.01)">Back −X</button>
-    <button onclick="jog('y',.01)">Left +Y</button>
-    <button onclick="jog('y',-.01)">Right −Y</button>
-    <button onclick="jog('z',.01)">Up +Z</button>
-    <button onclick="jog('z',-.01)">Down −Z</button>
-    <button onclick="jog('roll',2)">Roll +</button>
-    <button onclick="jog('roll',-2)">Roll −</button>
-    <button onclick="jog('pitch',2)">Pitch +</button>
-    <button onclick="jog('pitch',-2)">Pitch −</button>
-    <button onclick="jog('yaw',2)">Yaw +</button>
-    <button onclick="jog('yaw',-2)">Yaw −</button>
+    <button onclick="jog('x',1)">Forward +X</button>
+    <button onclick="jog('x',-1)">Back −X</button>
+    <button onclick="jog('y',1)">Left +Y</button>
+    <button onclick="jog('y',-1)">Right −Y</button>
+    <button onclick="jog('z',1)">Up +Z</button>
+    <button onclick="jog('z',-1)">Down −Z</button>
+    <button onclick="jog('roll',1)">Roll +</button>
+    <button onclick="jog('roll',-1)">Roll −</button>
+    <button onclick="jog('pitch',1)">Pitch +</button>
+    <button onclick="jog('pitch',-1)">Pitch −</button>
+    <button onclick="jog('yaw',1)">Yaw +</button>
+    <button onclick="jog('yaw',-1)">Yaw −</button>
   </div>
   <div class="actions" style="margin-top:10px">
     <button class="primary" onclick="sendPose()">Apply TCP pose</button>
@@ -114,7 +130,13 @@ button.warn { background: #7a3d15; border-color: #a8561e; }
 </main>
 <script>
 const ids = ['x','y','z','roll','pitch','yaw'];
+const speedSteps = {
+  precision: {translation:.002, rotation:.5},
+  normal: {translation:.010, rotation:2},
+  fast: {translation:.030, rotation:5}
+};
 let latest = null, initialized = false;
+let speedProfile = 'normal';
 async function command(payload) {
   const response = await fetch('/api/command', {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -128,10 +150,28 @@ function sendPose() {
   command({action:'set_pose',position_offset:v.slice(0,3),
     rpy_offset_deg:v.slice(3)});
 }
-function jog(id, delta) {
+function jog(id, direction) {
   const input = document.getElementById(id);
+  const rotationAxis = ['roll','pitch','yaw'].includes(id);
+  const delta = direction * (rotationAxis ?
+    speedSteps[speedProfile].rotation : speedSteps[speedProfile].translation);
   input.value = (Number(input.value || 0) + delta).toFixed(id.length === 1 ? 3 : 1);
   sendPose();
+}
+function setSpeed(profile) {
+  speedProfile = profile;
+  updateSpeedButtons();
+  command({action:'speed_profile',profile});
+}
+function updateSpeedButtons() {
+  Object.keys(speedSteps).forEach(profile => {
+    document.getElementById('speed-' + profile).classList.toggle(
+      'selected', profile === speedProfile);
+  });
+  ['x','y','z'].forEach(id =>
+    document.getElementById(id).step = speedSteps[speedProfile].translation);
+  ['roll','pitch','yaw'].forEach(id =>
+    document.getElementById(id).step = speedSteps[speedProfile].rotation);
 }
 function populate(state) {
   const values = [...state.position_offset, ...state.rpy_offset_deg];
@@ -149,6 +189,8 @@ async function poll() {
     if (!response.ok) throw new Error('HTTP ' + response.status);
     latest = await response.json();
     if (!initialized) { populate(latest); initialized = true; }
+    speedProfile = latest.speed_profile;
+    updateSpeedButtons();
     document.getElementById('status').textContent = 'Connected · running';
     document.getElementById('status').className = 'value';
     document.getElementById('error').textContent =
@@ -156,7 +198,8 @@ async function poll() {
       latest.orientation_error_deg.toFixed(2) + '°';
     document.getElementById('mode').textContent =
       (latest.mobile_base_active ? 'base moving' : 'arm workspace') + ' · ' +
-      (latest.gripper_closed ? 'closed' : 'open');
+      (latest.gripper_closed ? 'closed' : 'open') + ' · ' +
+      latest.speed_profile;
     document.getElementById('auto').checked = latest.auto_drive;
   } catch (error) {
     document.getElementById('status').textContent = 'Disconnected';
@@ -183,6 +226,9 @@ class WBCControlPanel:
             "mobile_base_active": False,
             "gripper_closed": False,
             "auto_drive": True,
+            "speed_profile": "normal",
+            "speed_scale": 1.0,
+            "rotation_speed_scale": 1.0,
         }
         self._state_lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None

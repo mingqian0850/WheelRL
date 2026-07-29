@@ -54,12 +54,44 @@ def test_panel_sets_pose_gripper_and_auto_drive_without_viewer_keys() -> None:
         controller,
     )
     assert not controller.auto_drive
+    assert _apply_panel_command(
+        {"action": "speed_profile", "profile": "fast"},
+        controller,
+    )
+    assert controller.speed_profile == "fast"
+    assert controller.speed_scale == 2.0
+    assert controller.rotation_speed_scale == 1.5
+    assert _panel_state(controller)["speed_profile"] == "fast"
     assert not _apply_panel_command({"action": "quit"}, controller)
 
     overlay = _viewer_overlay(controller, "http://127.0.0.1:8765/")
     assert len(overlay) == 2
     assert overlay[0][2] == "WheelRL WBC"
+    assert "Speed      fast (2.00x, rot 1.50x)" in overlay[0][3]
     assert overlay[1][3] == "http://127.0.0.1:8765/"
+
+
+def test_fast_profile_tracks_a_pose_faster_than_precision() -> None:
+    def error_after_half_second(profile: str) -> float:
+        model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
+        data = mujoco.MjData(model)
+        controller = B2WZ1WholeBodyController(
+            model,
+            data,
+            speed_profile=profile,
+        )
+        controller.reset()
+        for _ in range(200):
+            controller.step()
+        controller.capture_reference()
+        controller.set_home_offset(np.array([0.10, 0.0, 0.0]), np.zeros(3))
+        for _ in range(50):
+            diagnostics = controller.step()
+        return diagnostics.position_error
+
+    precision_error = error_after_half_second("precision")
+    fast_error = error_after_half_second("fast")
+    assert fast_error < 0.7 * precision_error
 
 
 def test_wbc_tracks_tcp_position_and_orientation_target() -> None:

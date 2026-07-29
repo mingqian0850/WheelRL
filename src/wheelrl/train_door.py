@@ -17,6 +17,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 
 from wheelrl.envs import B2WZ1DoorEnv
 from wheelrl.envs.b2w_z1_door import TASK_STAGES, TaskStage
+from wheelrl.runtime import default_run_dir, write_run_metadata
 
 CURRICULUM_WEIGHTS = {
     "reach": 0.15,
@@ -108,7 +109,7 @@ def main() -> None:
     parser.add_argument(
         "--run-dir",
         type=Path,
-        default=Path("runs/b2w_z1_pull_door_ppo"),
+        help="output directory; defaults to a unique host/time/seed path",
     )
     parser.add_argument("--resume-model", type=Path)
     parser.add_argument("--resume-stats", type=Path)
@@ -124,6 +125,8 @@ def main() -> None:
         raise RuntimeError("CUDA was requested but PyTorch cannot access the GPU")
     if (args.resume_model is None) != (args.resume_stats is None):
         raise ValueError("--resume-model and --resume-stats must be supplied together")
+    if args.run_dir is None:
+        args.run_dir = default_run_dir("b2w_z1_pull_door_ppo", args.seed)
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
     plan = _stage_plan(args.stage, args.timesteps)
@@ -190,6 +193,7 @@ def main() -> None:
         f"door_training_start device={model.device} n_envs={args.n_envs} "
         f"plan={plan} randomization={args.randomization} run_dir={args.run_dir}"
     )
+    write_run_metadata(args.run_dir, args)
     try:
         for task_stage, stage_steps in plan:
             train_env.env_method("set_task_stage", task_stage)

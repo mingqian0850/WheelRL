@@ -30,6 +30,7 @@ wheelrl-check-door = "wheelrl.check_door:main"
 wheelrl-eval-door = "wheelrl.eval_door:main"
 wheelrl-play = "wheelrl.play:main"
 wheelrl-play-door = "wheelrl.play_door:main"
+wheelrl-play-wbc = "wheelrl.play_wbc:main"
 wheelrl-train = "wheelrl.train:main"
 wheelrl-train-door = "wheelrl.train_door:main"
 

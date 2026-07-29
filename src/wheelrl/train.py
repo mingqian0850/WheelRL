@@ -22,6 +22,7 @@ from stable_baselines3.common.vec_env import (
 )
 
 from wheelrl.envs import B2WZ1Env
+from wheelrl.runtime import default_run_dir, write_run_metadata
 
 
 def make_env(seed: int, rank: int, command_scale: float):
@@ -43,26 +44,38 @@ def main() -> None:
     parser.add_argument(
         "--run-dir",
         type=Path,
-        default=Path("runs/b2w_z1_gripper_ppo"),
+        help="output directory; defaults to a unique host/time/seed path",
     )
+    parser.add_argument("--resume-model", type=Path)
+    parser.add_argument("--resume-stats", type=Path)
     args = parser.parse_args()
 
+    if args.run_dir is None:
+        args.run_dir = default_run_dir("b2w_z1_gripper_ppo", args.seed)
     args.run_dir.mkdir(parents=True, exist_ok=True)
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but PyTorch cannot access the GPU")
+    if (args.resume_model is None) != (args.resume_stats is None):
+        raise ValueError("--resume-model and --resume-stats must be supplied together")
 
     if not 0.0 <= args.command_scale <= 1.0:
         raise ValueError("--command-scale must be between 0 and 1")
 
     env_fns = [make_env(args.seed, rank, args.command_scale) for rank in range(args.n_envs)]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
-    train_env = VecNormalize(
-        vec_cls(env_fns),
-        norm_obs=True,
-        norm_reward=True,
-        clip_obs=10.0,
-        gamma=0.99,
-    )
+    raw_train_env = vec_cls(env_fns)
+    if args.resume_stats is not None:
+        train_env = VecNormalize.load(args.resume_stats, raw_train_env)
+        train_env.training = True
+        train_env.norm_reward = True
+    else:
+        train_env = VecNormalize(
+            raw_train_env,
+            norm_obs=True,
+            norm_reward=True,
+            clip_obs=10.0,
+            gamma=0.99,
+        )
     eval_env = VecNormalize(
         DummyVecEnv([make_env(args.seed + 10_000, 0, args.command_scale)]),
         norm_obs=True,
@@ -86,30 +99,35 @@ def main() -> None:
         deterministic=True,
     )
 
-    model = PPO(
-        "MlpPolicy",
-        train_env,
-        learning_rate=3.0e-4,
-        n_steps=512,
-        batch_size=512,
-        n_epochs=5,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        target_kl=0.02,
-        policy_kwargs={
-            "log_std_init": -1.0,
-            "net_arch": {"pi": [256, 256, 128], "vf": [256, 256, 128]},
-        },
-        tensorboard_log=str(args.run_dir / "tensorboard"),
-        device=args.device,
-        seed=args.seed,
-        verbose=1,
-    )
+    if args.resume_model is not None:
+        model = PPO.load(args.resume_model, env=train_env, device=args.device)
+        model.tensorboard_log = str(args.run_dir / "tensorboard")
+    else:
+        model = PPO(
+            "MlpPolicy",
+            train_env,
+            learning_rate=3.0e-4,
+            n_steps=512,
+            batch_size=512,
+            n_epochs=5,
+            gamma=0.99,
+            gae_lambda=0.95,
+            clip_range=0.2,
+            ent_coef=0.01,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            target_kl=0.02,
+            policy_kwargs={
+                "log_std_init": -1.0,
+                "net_arch": {"pi": [256, 256, 128], "vf": [256, 256, 128]},
+            },
+            tensorboard_log=str(args.run_dir / "tensorboard"),
+            device=args.device,
+            seed=args.seed,
+            verbose=1,
+        )
 
+    write_run_metadata(args.run_dir, args)
     print(
         f"training_start device={model.device} n_envs={args.n_envs} "
         f"timesteps={args.timesteps} run_dir={args.run_dir}"
@@ -119,6 +137,7 @@ def main() -> None:
             total_timesteps=args.timesteps,
             callback=[checkpoint, evaluation],
             progress_bar=True,
+            reset_num_timesteps=args.resume_model is None,
         )
         model.save(args.run_dir / "final_model")
         train_env.save(args.run_dir / "vecnormalize.pkl")

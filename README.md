@@ -34,6 +34,60 @@ The bootstrap script installs an isolated Python 3.11 environment, resolves the
 locked dependencies, validates the MuJoCo model, and prints CUDA availability.
 A separate CUDA Toolkit (`nvcc`) is not required for PyTorch wheels.
 
+### Separate Ubuntu RTX 4090 machine
+
+The 4090 machine should use its own native-Linux Git clone and virtual
+environment:
+
+```bash
+git clone --branch ubuntu-4090-training \
+  https://github.com/mingqian0850/WheelRL.git ~/WheelRL
+cd ~/WheelRL
+bash scripts/bootstrap_ubuntu_4090.sh
+source .venv/bin/activate
+```
+
+The bootstrap checks both robot scenes and fails clearly if PyTorch cannot see
+an RTX 4090 with roughly 24 GB VRAM. WSL and Ubuntu runs can proceed at the
+same time, but Stable-Baselines3 PPO does not combine gradients across the two
+processes. Treat them as independent seeds or hyperparameter trials:
+
+```bash
+# WSL: CPU MuJoCo trial
+wheelrl-train-door \
+  --stage curriculum --timesteps 3000000 --n-envs 6 \
+  --device cpu --randomization 0.35 --seed 42
+```
+
+```bash
+# Native Ubuntu 4090: independent trial
+scripts/train_ubuntu_4090.sh door
+```
+
+The same launcher accepts `gripper`. Override its defaults with environment
+variables, for example:
+
+```bash
+SEED=143 N_ENVS=12 TIMESTEPS=5000000 \
+  RANDOMIZATION=0.7 scripts/train_ubuntu_4090.sh door
+```
+
+When `--run-dir` is omitted, each trainer now writes to a collision-free path
+containing the task, host name, UTC timestamp, and seed. Every run also stores
+`metadata.json` with the OS, command, Git commit, MuJoCo/PyTorch versions, and
+visible CUDA devices. The current state-only MLP is normally faster with
+`--device cpu`, because MuJoCo physics remains CPU-based. Benchmark
+`--device cuda` on the 4090, but expect that GPU to become important mainly
+after adding RGB-D perception or a larger policy.
+
+To continue one selected checkpoint on another machine, copy the model and
+normalization statistics together:
+
+```text
+wheelrl-train-door --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
+wheelrl-train      --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
+```
+
 ## Verify and view the robot
 
 Headless model and API check:
@@ -53,6 +107,67 @@ Open the MuJoCo viewer with a neutral standing controller:
 ```bash
 wheelrl-play --seconds 30
 ```
+
+Open the interactive TCP-pose whole-body controller:
+
+```bash
+wheelrl-play-wbc --seconds 120
+```
+
+By default this prints and opens a localhost browser control panel. It provides
+numeric TCP `x/y/z + roll/pitch/yaw` inputs, jog buttons, separate gripper
+open/close buttons, Home, automatic-base-motion control, and live tracking
+error. MuJoCo keeps exclusive ownership of its keyboard shortcuts, so camera,
+pause, help, and visualization controls no longer conflict with robot commands.
+The yellow/red-green-blue triad in MuJoCo is the commanded Z1 TCP pose.
+
+If the browser cannot be opened automatically, visit the printed URL (normally
+`http://127.0.0.1:8765/`). Choose a free port automatically with
+`--panel-port 0`, or suppress automatic browser launch with
+`--no-open-browser`.
+
+See [`docs/MUJOCO_VIEWER_GUIDE.md`](docs/MUJOCO_VIEWER_GUIDE.md) for every
+viewer panel, mouse action, and keyboard shortcut relevant to WheelRL.
+
+The original keyboard controls remain as an explicit legacy mode:
+
+```bash
+wheelrl-play-wbc --controls keyboard
+```
+
+In that mode, `W/S` move forward/backward, `A/D` move left/right, `R/F` move
+along `z`, `U/O`, `I/K`, and `J/L` rotate the target, `H` returns home, `C`
+toggles the gripper, and `P` prints the pose. Because MuJoCo receives these keys
+too, the browser panel is the recommended play interface.
+
+A repeatable headless pose command is also available:
+
+```bash
+wheelrl-play-wbc \
+  --headless \
+  --seconds 10 \
+  --target-offset 0.10 0.04 -0.04 \
+  --rpy-offset-deg 4 -6 8
+```
+
+At 100 Hz the example solves wheel rolling constraints, floating-base motion
+and stabilization, TCP SE(3), and posture tasks in one weighted damped
+least-squares system. The resulting leg and arm velocities are integrated into
+references, while four wheel-velocity targets drive the nonholonomic base. All
+targets are tracked through the existing 500 Hz torque interface.
+
+Targets inside a conservative Z1 workspace envelope mainly use the arm, with
+limited leg/base help from `--base-assist` (default `0.25`). When a target
+exceeds that envelope, automatic drive turns and/or translates B2-W while Z1
+simultaneously moves toward the reachable part of the same world-frame target.
+Use `--no-auto-drive` to disable this behavior.
+
+This remains a simulation controller rather than a robot-ready inverse-dynamics
+or force controller: friction-cone/contact-force optimization, collision-aware
+trajectory planning, and hardware safety remain separate steps. The WBC scene
+also excludes one proximal `base_link`/`z1_link02` collision pair because the
+assumed mounting bracket overlaps the conservative simulated lidar collision
+box; the real mount transform and collision geometry must be measured.
 
 View the robot at the pull door:
 
@@ -86,7 +201,7 @@ tensorboard --logdir runs
 Play a trained model:
 
 ```bash
-wheelrl-play --model runs/b2w_z1_gripper_ppo/best/best_model.zip
+wheelrl-play --model <RUN_DIR>/best/best_model.zip
 ```
 
 The environment ID is `WheelRL-B2WZ1Grip-v0`. Checkpoints produced by the
@@ -155,8 +270,8 @@ explicitly saves the best policy by deterministic task success rate. After a
 curriculum run, prefer:
 
 ```text
-runs/b2w_z1_pull_door_ppo/full/best_success/best_success_model.zip
-runs/b2w_z1_pull_door_ppo/full/best_success/vecnormalize.pkl
+<RUN_DIR>/full/best_success/best_success_model.zip
+<RUN_DIR>/full/best_success/vecnormalize.pkl
 ```
 
 If no full-stage evaluation has produced a successful policy yet, the trainer
@@ -167,8 +282,8 @@ Replay the best full-task policy:
 
 ```bash
 wheelrl-play-door \
-  --model runs/b2w_z1_pull_door_ppo/full/best_success/best_success_model.zip \
-  --stats runs/b2w_z1_pull_door_ppo/full/best_success/vecnormalize.pkl \
+  --model <RUN_DIR>/full/best_success/best_success_model.zip \
+  --stats <RUN_DIR>/full/best_success/vecnormalize.pkl \
   --stage full
 ```
 
@@ -176,8 +291,8 @@ Evaluate 100 randomized episodes:
 
 ```bash
 wheelrl-eval-door \
-  --model runs/b2w_z1_pull_door_ppo/full/best_success/best_success_model.zip \
-  --stats runs/b2w_z1_pull_door_ppo/full/best_success/vecnormalize.pkl \
+  --model <RUN_DIR>/full/best_success/best_success_model.zip \
+  --stats <RUN_DIR>/full/best_success/vecnormalize.pkl \
   --episodes 100 \
   --randomization 1
 ```

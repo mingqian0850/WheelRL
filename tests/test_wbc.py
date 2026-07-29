@@ -1,7 +1,12 @@
 import mujoco
 import numpy as np
 
-from wheelrl.play_wbc import _apply_panel_command, _handle_key, _panel_state
+from wheelrl.play_wbc import (
+    _apply_panel_command,
+    _handle_key,
+    _panel_state,
+    _viewer_overlay,
+)
 from wheelrl.wbc import (
     WBC_MODEL_PATH,
     B2WZ1WholeBodyController,
@@ -50,6 +55,11 @@ def test_panel_sets_pose_gripper_and_auto_drive_without_viewer_keys() -> None:
     )
     assert not controller.auto_drive
     assert not _apply_panel_command({"action": "quit"}, controller)
+
+    overlay = _viewer_overlay(controller, "http://127.0.0.1:8765/")
+    assert len(overlay) == 2
+    assert overlay[0][2] == "WheelRL WBC"
+    assert overlay[1][3] == "http://127.0.0.1:8765/"
 
 
 def test_wbc_tracks_tcp_position_and_orientation_target() -> None:

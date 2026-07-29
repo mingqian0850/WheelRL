@@ -136,11 +136,15 @@ def _panel_state(controller: B2WZ1WholeBodyController) -> dict[str, Any]:
     }
 
 
-def _set_viewer_overlay(
-    viewer: object,
+def _viewer_overlay(
     controller: B2WZ1WholeBodyController,
     panel_url: str | None,
-) -> None:
+) -> list[tuple[object, object, str, str]]:
+    """Build viewer text while caller owns the data lock.
+
+    Handle.set_texts() takes the native viewer mutex internally, so it must be
+    called only after releasing viewer.lock().
+    """
     diagnostics = controller.diagnostics()
     lines = [
         f"TCP error  {diagnostics.position_error:.4f} m",
@@ -149,31 +153,24 @@ def _set_viewer_overlay(
         + ("moving" if diagnostics.mobile_base_active else "arm workspace"),
         "Gripper    " + ("closed" if controller.gripper_closed else "open"),
     ]
-    viewer.set_texts(
+    texts = [
         (
             mujoco.mjtFontScale.mjFONTSCALE_100,
             mujoco.mjtGridPos.mjGRID_TOPLEFT,
             "WheelRL WBC",
             "\n".join(lines),
         )
-    )
+    ]
     if panel_url is not None:
-        viewer.set_texts(
-            [
-                (
-                    mujoco.mjtFontScale.mjFONTSCALE_100,
-                    mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                    "WheelRL WBC",
-                    "\n".join(lines),
-                ),
-                (
-                    mujoco.mjtFontScale.mjFONTSCALE_100,
-                    mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-                    "TCP and gripper controls",
-                    panel_url,
-                ),
-            ]
+        texts.append(
+            (
+                mujoco.mjtFontScale.mjFONTSCALE_100,
+                mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+                "TCP and gripper controls",
+                panel_url,
+            )
         )
+    return texts
 
 
 def _run_settle(
@@ -315,22 +312,25 @@ def main() -> None:
         if viewer is not None:
             with viewer.lock():
                 _print_pose(controller)
-                _set_viewer_overlay(
-                    viewer,
+                overlay = _viewer_overlay(
                     controller,
                     panel.url if panel is not None else None,
                 )
+            viewer.set_texts(overlay)
         else:
             _print_pose(controller)
 
         deadline = time.monotonic() + args.seconds
         next_report = time.monotonic() + 1.0
+        next_ui_update = time.monotonic()
         keep_running = True
         while time.monotonic() < deadline and (
             viewer is None or viewer.is_running()
         ) and keep_running:
             start = time.monotonic()
             if viewer is not None:
+                panel_state = None
+                overlay = None
                 with viewer.lock():
                     while not key_queue.empty():
                         _handle_key(key_queue.get_nowait(), controller)
@@ -347,13 +347,20 @@ def main() -> None:
                                 break
                     if keep_running:
                         controller.step()
-                        _set_viewer_overlay(
-                            viewer,
-                            controller,
-                            panel.url if panel is not None else None,
-                        )
-                        if panel is not None:
-                            panel.publish(_panel_state(controller))
+                        if time.monotonic() >= next_ui_update:
+                            overlay = _viewer_overlay(
+                                controller,
+                                panel.url if panel is not None else None,
+                            )
+                            if panel is not None:
+                                panel_state = _panel_state(controller)
+                            next_ui_update = time.monotonic() + 0.10
+                # Both methods take their own native/Python locks. Calling
+                # either while viewer.lock() is held deadlocks the GUI.
+                if overlay is not None:
+                    viewer.set_texts(overlay)
+                if panel is not None and panel_state is not None:
+                    panel.publish(panel_state)
                 viewer.sync()
                 elapsed = time.monotonic() - start
                 if elapsed < controller.control_dt:
@@ -392,9 +399,8 @@ def main() -> None:
         if panel is not None:
             panel.close()
         if viewer is not None:
-            viewer.sync()
-            time.sleep(0.05)
-            viewer.close()
+            if viewer.is_running():
+                viewer.close()
             # close() signals the native render thread asynchronously. Giving
             # it time to leave avoids a WSL/glibc teardown race; querying the
             # handle with is_running() after close is itself unsafe.

@@ -214,7 +214,12 @@ def _run_settle(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=120.0)
-    parser.add_argument("--settle-seconds", type=float, default=2.0)
+    parser.add_argument(
+        "--settle-seconds",
+        type=float,
+        default=None,
+        help="settle time before tracking; MPC mode defaults to one step",
+    )
     parser.add_argument("--control-hz", type=float, default=100.0)
     parser.add_argument("--base-assist", type=float, default=0.25)
     parser.add_argument(
@@ -255,6 +260,13 @@ def main() -> None:
         help="input mode; defaults to panel with a viewer and none headless",
     )
     parser.add_argument(
+        "--controller",
+        choices=("wbc", "mpc"),
+        default="wbc",
+        help="controller backend: velocity-level WBC (default) or inverse-"
+        "dynamics MPC (slower, experimental)",
+    )
+    parser.add_argument(
         "--panel-port",
         type=int,
         default=8765,
@@ -272,14 +284,48 @@ def main() -> None:
 
     model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
     data = mujoco.MjData(model)
-    controller = B2WZ1WholeBodyController(
-        model,
-        data,
-        control_hz=args.control_hz,
-        base_assist=args.base_assist,
-        auto_drive=not args.no_auto_drive,
-        speed_profile=args.speed_profile,
-    )
+    if args.controller == "mpc":
+        # casadi/pinocchio live in the separate 'wheelrl-mpc' environment;
+        # import lazily so the default environment keeps working without them.
+        try:
+            from wheelrl.wbc_mpc import B2WZ1MPCController
+        except ModuleNotFoundError as error:
+            raise SystemExit(
+                "MPC mode needs casadi and pinocchio, which are not installed "
+                f"in this Python environment (missing module: {error.name!r}). "
+                "Run from the 'wheelrl-mpc' micromamba environment, e.g.\n"
+                "  micromamba activate wheelrl-mpc\n"
+                "  python -m wheelrl.play_wbc --controller mpc"
+            ) from error
+        if args.no_auto_drive:
+            print("MPC mode ignores --no-auto-drive (wheels roll via contact).")
+        # The interpreted ipopt solve takes seconds per step; settle with a
+        # single MPC step unless the user explicitly asks for more.
+        controller = B2WZ1MPCController(
+            model,
+            data,
+            control_hz=min(args.control_hz, 20.0),
+            solver="fatrop",
+            load_compiled_solver=True,
+        )
+        controller.set_speed_profile(args.speed_profile)
+        if args.settle_seconds is None:
+            args.settle_seconds = controller.control_dt
+        print(
+            "MPC controller: compiled fatrop inverse-dynamics OCP "
+            "(~50 ms/step). Move targets from the panel/keyboard."
+        )
+    else:
+        controller = B2WZ1WholeBodyController(
+            model,
+            data,
+            control_hz=args.control_hz,
+            base_assist=args.base_assist,
+            auto_drive=not args.no_auto_drive,
+            speed_profile=args.speed_profile,
+        )
+        if args.settle_seconds is None:
+            args.settle_seconds = 2.0
     controller.reset()
 
     key_queue: queue.SimpleQueue[int] = queue.SimpleQueue()

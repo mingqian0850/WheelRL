@@ -20,3 +20,13 @@ runs/b2w_z1_pull_door_ppo/full/best_success/*
 !runs/b2w_z1_pull_door_ppo/full/best_success/vecnormalize.pkl
 videos/
 *.mp4
+
+# Whole-body MPC generated artifacts. Regenerate with:
+#   python -m wheelrl.mpc.codegen   # writes solver_function.c
+# then build the CMake project in assets/b2w_z1/mpc/codegen and copy
+# libsolver_function.so to codegen/lib/.
+solver_function.c
+retract_solution.c
+src/wheelrl/assets/b2w_z1/mpc/codegen/solver_function.c
+src/wheelrl/assets/b2w_z1/mpc/codegen/build/
+src/wheelrl/assets/b2w_z1/mpc/codegen/lib/

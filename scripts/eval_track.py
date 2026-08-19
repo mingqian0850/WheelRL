@@ -24,11 +24,12 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from wheelrl.envs import B2WZ1TrackEnv
 
 
-def make_env(seed: int, curriculum: float, motion: float):
+def make_env(seed: int, curriculum: float, motion: float, randomization: float):
     def _factory():
         env = B2WZ1TrackEnv(
             tracking_curriculum=curriculum,
             target_motion=motion,
+            randomization=randomization,
         )
         env.reset(seed=seed)
         return env
@@ -44,6 +45,7 @@ def main() -> None:
     parser.add_argument("--curriculum", type=float, default=1.0)
     parser.add_argument("--motion", type=float, default=1.0)
     parser.add_argument("--max-steps", type=int, default=1000)
+    parser.add_argument("--randomization", type=float, default=1.0)
     parser.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     args = parser.parse_args()
 
@@ -53,7 +55,7 @@ def main() -> None:
         raise ValueError("--max-steps must be positive")
 
     env = VecNormalize(
-        DummyVecEnv([make_env(10_000, args.curriculum, args.motion)]),
+        DummyVecEnv([make_env(10_000, args.curriculum, args.motion, args.randomization)]),
         norm_obs=True,
         norm_reward=False,
         training=False,
@@ -95,7 +97,8 @@ def main() -> None:
         mean_upright.append(float(np.mean(upright_values)))
 
     print(
-        f"episodes={args.episodes} curriculum={args.curriculum} motion={args.motion}"
+        f"episodes={args.episodes} curriculum={args.curriculum} "
+        f"motion={args.motion} randomization={args.randomization}"
     )
     print(f"mean pos error  : {np.mean(position_errors):.4f} m")
     print(f"mean ori error  : {np.mean(orientation_errors):.4f} rad "

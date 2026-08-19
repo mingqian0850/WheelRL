@@ -21,11 +21,16 @@ from wheelrl.envs import B2WZ1TrackEnv
 from wheelrl.runtime import default_run_dir, write_run_metadata
 
 
-def make_env(seed: int, rank: int, curriculum: float, motion: float):
+def make_env(
+    seed: int, rank: int, curriculum: float, motion: float,
+    randomization: float, orientation_weight: float,
+):
     def _factory():
         env = B2WZ1TrackEnv(
             tracking_curriculum=curriculum,
             target_motion=motion,
+            randomization=randomization,
+            orientation_weight=orientation_weight,
         )
         env.reset(seed=seed + rank)
         return Monitor(env)
@@ -44,6 +49,18 @@ def main() -> None:
         type=float,
         default=1.0,
         help="tracking curriculum 0..1: initial EE offset/orientation magnitude",
+    )
+    parser.add_argument(
+        "--orientation-weight",
+        type=float,
+        default=0.6,
+        help="TCP orientation reward weight",
+    )
+    parser.add_argument(
+        "--randomization",
+        type=float,
+        default=1.0,
+        help="domain-randomization strength 0..1 (mass/friction/PD/initial pose)",
     )
     parser.add_argument(
         "--motion",
@@ -68,6 +85,8 @@ def main() -> None:
         raise ValueError("--curriculum must be between 0 and 1")
     if not 0.0 <= args.motion <= 1.0:
         raise ValueError("--motion must be between 0 and 1")
+    if not 0.0 <= args.randomization <= 1.0:
+        raise ValueError("--randomization must be between 0 and 1")
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but PyTorch cannot access the GPU")
     if (args.resume_model is None) != (args.resume_stats is None):
@@ -77,7 +96,10 @@ def main() -> None:
     args.run_dir.mkdir(parents=True, exist_ok=True)
 
     env_fns = [
-        make_env(args.seed, rank, args.curriculum, args.motion)
+        make_env(
+            args.seed, rank, args.curriculum, args.motion,
+            args.randomization, args.orientation_weight,
+        )
         for rank in range(args.n_envs)
     ]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
@@ -95,7 +117,12 @@ def main() -> None:
             gamma=0.99,
         )
     eval_env = VecNormalize(
-        DummyVecEnv([make_env(args.seed + 10_000, 0, args.curriculum, args.motion)]),
+        DummyVecEnv(
+            [make_env(
+                args.seed + 10_000, 0, args.curriculum, args.motion,
+                args.randomization, args.orientation_weight
+            )]
+        ),
         norm_obs=True,
         norm_reward=False,
         training=False,
@@ -151,7 +178,8 @@ def main() -> None:
     print(
         f"track_training_start device={model.device} n_envs={args.n_envs} "
         f"timesteps={args.timesteps} curriculum={args.curriculum} "
-        f"motion={args.motion} resume={args.resume_model is not None} "
+        f"motion={args.motion} randomization={args.randomization} "
+        f"resume={args.resume_model is not None} "
         f"run_dir={args.run_dir}"
     )
     write_run_metadata(args.run_dir, args)

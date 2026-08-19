@@ -51,6 +51,22 @@ TARGET_VMAX = 0.10
 POS_OFFSET_LOW = np.array([-0.07, -0.10, -0.06], dtype=np.float64)
 POS_OFFSET_HIGH = np.array([0.07, 0.10, 0.08], dtype=np.float64)
 
+# --- domain randomization and posture quality (randomization >= 0) ----------
+# Initial arm-pose randomization: sampled UNIFORMLY over the full joint
+# ranges so the policy must stabilize from stretched, folded and
+# near-singular postures - not only around the nominal pose.
+# Dynamics randomization strengths at randomization=1.0.
+MASS_RANGE = 0.15      # per-body mass/inertia scale
+FRICTION_RANGE = 0.30  # floor friction
+PD_RANGE = 0.10        # overall PD gain scale
+# Posture-quality shaping: stay away from joint limits and low
+# manipulability (arm Jacobian singular values), where kinematic controllers
+# degrade.
+JOINT_MARGIN_MIN = 0.20  # rad, penalty starts below this distance to a limit
+JOINT_MARGIN_WEIGHT = 2.0
+MANIP_MIN = 0.15         # smallest arm-Jacobian singular value threshold
+MANIP_WEIGHT = 0.05
+
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
     """SO(3) logarithm of a rotation matrix (axis * angle)."""
@@ -107,6 +123,8 @@ class B2WZ1TrackEnv(B2WZ1Env):
         max_episode_steps: int = 1000,
         tracking_curriculum: float = 1.0,
         target_motion: float = 0.0,
+        randomization: float = 0.0,
+        orientation_weight: float = 0.6,
         _model_filename: str = "scene.xml",
     ) -> None:
         super().__init__(
@@ -117,6 +135,8 @@ class B2WZ1TrackEnv(B2WZ1Env):
         )
         self.tracking_curriculum = float(np.clip(tracking_curriculum, 0.0, 1.0))
         self.target_motion = float(np.clip(target_motion, 0.0, 1.0))
+        self.randomization = float(np.clip(randomization, 0.0, 1.0))
+        self.orientation_weight = float(orientation_weight)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(86,), dtype=np.float32
         )
@@ -132,6 +152,13 @@ class B2WZ1TrackEnv(B2WZ1Env):
             for name in ("FL_wheel_link", "FR_wheel_link", "RL_wheel_link", "RR_wheel_link")
         }
         self._floor_geom_id = self._id(mujoco.mjtObj.mjOBJ_GEOM, "floor")
+
+        # Domain-randomization baselines (per-env model copies).
+        self._nominal_body_mass = self.model.body_mass.copy()
+        self._nominal_body_inertia = self.model.body_inertia.copy()
+        self._nominal_floor_friction = self.model.geom_friction[self._floor_geom_id].copy()
+        self._pd_scale = 1.0
+        self._arm_ranges = self.model.jnt_range[self._joint_ids[16:22]].copy()
 
     # ------------------------------------------------------------ task space
     def _current_ee_rotation_base(self) -> FloatArray:
@@ -199,6 +226,29 @@ class B2WZ1TrackEnv(B2WZ1Env):
     ) -> tuple[np.ndarray, dict[str, Any]]:
         observation, info = super().reset(seed=seed, options=options)
 
+        if self.randomization > 0.0:
+            scale = self.randomization
+            # Dynamics domain randomization: per-body mass/inertia, floor
+            # friction, and overall PD gain scale.
+            mass_scale = 1.0 + self.np_random.uniform(
+                -MASS_RANGE, MASS_RANGE, size=self.model.nbody
+            ) * scale
+            self.model.body_mass[:] = self._nominal_body_mass * mass_scale
+            self.model.body_inertia[:] = self._nominal_body_inertia * mass_scale[:, None]
+            self.model.geom_friction[self._floor_geom_id] = self._nominal_floor_friction * (
+                1.0 + self.np_random.uniform(-FRICTION_RANGE, FRICTION_RANGE) * scale
+            )
+            self._pd_scale = float(
+                1.0 + self.np_random.uniform(-PD_RANGE, PD_RANGE) * scale
+            )
+            # Initial arm-pose randomization over the FULL joint ranges: the
+            # policy must stabilize from stretched/folded/singular postures.
+            initial_arm = self.np_random.uniform(
+                self._arm_ranges[:, 0], self._arm_ranges[:, 1]
+            )
+            self.data.qpos[self._qpos_adr[16:22]] = initial_arm
+            mujoco.mj_forward(self.model, self.data)
+
         scale = self.tracking_curriculum
         self._ee_target_rpy = self.np_random.uniform(-ORI_MAX, ORI_MAX, size=3) * scale
         # The target orientation is the current TCP orientation plus the sampled
@@ -254,6 +304,12 @@ class B2WZ1TrackEnv(B2WZ1Env):
         )
         return extended.astype(np.float32)
 
+    def _compute_torque(self, action: FloatArray) -> FloatArray:
+        torque = super()._compute_torque(action)
+        if self._pd_scale != 1.0:
+            torque = torque * self._pd_scale
+        return torque
+
     def _reward(
         self,
         action: FloatArray,
@@ -273,6 +329,20 @@ class B2WZ1TrackEnv(B2WZ1Env):
         # Height band: squatting/rising beyond +/-0.12 m around the natural
         # height costs reward linearly, so crouching for stability is bounded.
         height_band = max(0.0, abs(height_error) - 0.12)
+        # Posture quality: stay away from joint limits and from arm-Jacobian
+        # singularities, where kinematic controllers degrade.
+        arm_qpos = self.data.qpos[self._qpos_adr[16:22]]
+        margin = np.minimum(
+            arm_qpos - self._arm_ranges[:, 0], self._arm_ranges[:, 1] - arm_qpos
+        )
+        joint_margin = float(np.sum(np.maximum(0.0, JOINT_MARGIN_MIN - margin) ** 2))
+        arm_jacobian = np.zeros((6, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacSite(
+            self.model, self.data, arm_jacobian[:3], arm_jacobian[3:], self._ee_site_id
+        )
+        arm_jacobian = arm_jacobian[:, self._dof_adr[16:22]]
+        sigma_min = float(np.linalg.svd(arm_jacobian, compute_uv=False)[-1])
+        manipulability = max(0.0, MANIP_MIN - sigma_min)
 
         terms = {
             "ee_position": float(np.exp(-18.0 * position_error**2)) * stability_gate,
@@ -292,6 +362,8 @@ class B2WZ1TrackEnv(B2WZ1Env):
             "wheel_lift_penalty": -0.25 * float(wheels_off),
             "height": float(np.exp(-12.0 * height_error**2)),
             "height_band_penalty": -1.00 * float(height_band),
+            "joint_margin_penalty": -JOINT_MARGIN_WEIGHT * joint_margin,
+            "manipulability_penalty": -MANIP_WEIGHT * manipulability,
             "alive": 1.0,
             "energy_penalty": -2.0e-5
             * float(np.sum(np.abs(torque * self.data.qvel[self._dof_adr]))),
@@ -300,13 +372,15 @@ class B2WZ1TrackEnv(B2WZ1Env):
         }
         reward = (
             1.00 * terms["ee_position"]
-            + 0.60 * terms["ee_orientation"]
+            + self.orientation_weight * terms["ee_orientation"]
             + 0.50 * terms["sync_gate"]
             + 0.25 * terms["upright"]
             + terms["tilt_penalty"]
             + terms["pitch_rate_penalty"]
             + terms["wheel_lift_penalty"]
             + terms["height_band_penalty"]
+            + terms["joint_margin_penalty"]
+            + terms["manipulability_penalty"]
             + 0.15 * terms["height"]
             + 0.05 * terms["alive"]
             + terms["energy_penalty"]

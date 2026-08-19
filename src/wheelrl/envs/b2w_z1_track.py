@@ -31,7 +31,7 @@ import numpy as np
 from gymnasium import spaces
 from numpy.typing import NDArray
 
-from wheelrl.envs.b2w_z1 import B2WZ1Env
+from wheelrl.envs.b2w_z1 import ARM_NOMINAL, B2WZ1Env
 
 FloatArray = NDArray[np.float64]
 
@@ -125,6 +125,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         target_motion: float = 0.0,
         randomization: float = 0.0,
         orientation_weight: float = 0.6,
+        pose_curriculum: float = 1.0,
         _model_filename: str = "scene.xml",
     ) -> None:
         super().__init__(
@@ -137,6 +138,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         self.target_motion = float(np.clip(target_motion, 0.0, 1.0))
         self.randomization = float(np.clip(randomization, 0.0, 1.0))
         self.orientation_weight = float(orientation_weight)
+        self.pose_curriculum = float(np.clip(pose_curriculum, 0.0, 1.0))
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(86,), dtype=np.float32
         )
@@ -241,11 +243,14 @@ class B2WZ1TrackEnv(B2WZ1Env):
             self._pd_scale = float(
                 1.0 + self.np_random.uniform(-PD_RANGE, PD_RANGE) * scale
             )
-            # Initial arm-pose randomization over the FULL joint ranges: the
-            # policy must stabilize from stretched/folded/singular postures.
-            initial_arm = self.np_random.uniform(
+            # Initial arm-pose randomization, interpolated between the nominal
+            # pose (pose_curriculum=0) and the full joint ranges
+            # (pose_curriculum=1): the policy must stabilize from
+            # stretched/folded/singular postures.
+            full_arm = self.np_random.uniform(
                 self._arm_ranges[:, 0], self._arm_ranges[:, 1]
             )
+            initial_arm = ARM_NOMINAL + (full_arm - ARM_NOMINAL) * self.pose_curriculum
             self.data.qpos[self._qpos_adr[16:22]] = initial_arm
             mujoco.mj_forward(self.model, self.data)
 
@@ -346,7 +351,12 @@ class B2WZ1TrackEnv(B2WZ1Env):
 
         terms = {
             "ee_position": float(np.exp(-18.0 * position_error**2)) * stability_gate,
-            "ee_orientation": float(np.exp(-25.0 * orientation_error**2)) * stability_gate,
+            # Sharp exp near zero error, linear falloff beyond ~0.2 rad so the
+            # gradient never vanishes while the arm is far from the orientation.
+            "ee_orientation": float(
+                max(np.exp(-25.0 * orientation_error**2), 1.0 - orientation_error / 1.5)
+            )
+            * stability_gate,
             # RFM-inspired multiplicative gate: both pose parts must be small.
             "sync_gate": float(
                 np.exp(-8.0 * position_error**2) * np.exp(-8.0 * orientation_error**2)

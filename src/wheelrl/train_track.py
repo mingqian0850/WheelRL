@@ -23,7 +23,7 @@ from wheelrl.runtime import default_run_dir, write_run_metadata
 
 def make_env(
     seed: int, rank: int, curriculum: float, motion: float,
-    randomization: float, orientation_weight: float,
+    randomization: float, orientation_weight: float, pose_curriculum: float,
 ):
     def _factory():
         env = B2WZ1TrackEnv(
@@ -31,6 +31,7 @@ def make_env(
             target_motion=motion,
             randomization=randomization,
             orientation_weight=orientation_weight,
+            pose_curriculum=pose_curriculum,
         )
         env.reset(seed=seed + rank)
         return Monitor(env)
@@ -49,6 +50,12 @@ def main() -> None:
         type=float,
         default=1.0,
         help="tracking curriculum 0..1: initial EE offset/orientation magnitude",
+    )
+    parser.add_argument(
+        "--pose-curriculum",
+        type=float,
+        default=1.0,
+        help="initial arm-pose randomization 0=nominal .. 1=full joint ranges",
     )
     parser.add_argument(
         "--orientation-weight",
@@ -98,7 +105,7 @@ def main() -> None:
     env_fns = [
         make_env(
             args.seed, rank, args.curriculum, args.motion,
-            args.randomization, args.orientation_weight,
+            args.randomization, args.orientation_weight, args.pose_curriculum,
         )
         for rank in range(args.n_envs)
     ]
@@ -120,7 +127,7 @@ def main() -> None:
         DummyVecEnv(
             [make_env(
                 args.seed + 10_000, 0, args.curriculum, args.motion,
-                args.randomization, args.orientation_weight
+                args.randomization, args.orientation_weight, args.pose_curriculum
             )]
         ),
         norm_obs=True,

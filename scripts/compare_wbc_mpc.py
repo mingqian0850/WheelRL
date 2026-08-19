@@ -11,8 +11,8 @@ Run inside the wheelrl-mpc environment:
 
 from __future__ import annotations
 
-import numpy as np
 import mujoco
+import numpy as np
 
 from wheelrl.wbc import WBC_MODEL_PATH, B2WZ1WholeBodyController
 from wheelrl.wbc_mpc import B2WZ1MPCController

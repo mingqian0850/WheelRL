@@ -31,7 +31,10 @@ FloatArray = NDArray[np.float64]
 TaskStage = Literal["reach", "turn", "pull", "full"]
 TASK_STAGES: tuple[TaskStage, ...] = ("reach", "turn", "pull", "full")
 
-BASE_START = np.array([0.12, -0.47, 0.68], dtype=np.float64)
+# The robot starts 0.23 m further forward than before the Z1 mount moved from
+# x=0.23 to x=0.0, keeping the arm-to-handle geometry identical for the
+# trained policy (everything relative to the base is unchanged).
+BASE_START = np.array([0.35, -0.47, 0.68], dtype=np.float64)
 PREGRASP_ARM = np.array(
     [-0.16904, 1.98459, -1.84672, 0.03933, -0.06931, 0.0],
     dtype=np.float64,

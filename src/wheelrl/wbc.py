@@ -63,6 +63,18 @@ BASE_VEL_DAMPING = 0.80
 # Arm servo gains are boosted locally (the RL envs keep their own tuning).
 ARM_KP_SCALE = 1.5
 ARM_KD_SCALE = 2.0
+# Reverse mode: when the target lies behind the base (more than REVERSE_ANGLE
+# from the heading), drive the base backward instead of turning around. The
+# desired base parks the target at this base-frame x so the arm reaches it
+# over its shoulder (measured arm workspace x extends to about -0.65 m).
+REVERSE_ANGLE = 2.0  # rad (~115 deg) from the current heading: enter reverse
+REVERSE_EXIT_ANGLE = 1.5  # rad (~86 deg): hysteresis exit for reverse mode
+# Parking x: the target is parked just behind the base. Deep backward reach
+# (x < -0.15) sits at the arm's joint-limit boundary, so the robot backs up
+# nearly all the way and the arm does a short over-the-shoulder reach.
+REVERSE_TARGET_X = -0.05  # m, base-frame x of the target when parked
+REVERSE_REACHABLE_DELTA = np.array([-0.80, -0.10, -0.14], dtype=np.float64)
+REVERSE_REACHABLE_DELTA_HIGH = np.array([-0.05, 0.10, 0.14], dtype=np.float64)
 
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
@@ -157,6 +169,7 @@ class B2WZ1WholeBodyController:
         control_hz: float = 100.0,
         base_assist: float = 0.25,
         auto_drive: bool = True,
+        reverse_mode: bool = True,
         speed_profile: str = "normal",
     ) -> None:
         self.model = model
@@ -168,6 +181,8 @@ class B2WZ1WholeBodyController:
             raise ValueError("control_hz must divide the MuJoCo simulation frequency")
         self.base_assist = float(np.clip(base_assist, 0.0, 1.0))
         self.auto_drive = auto_drive
+        self.reverse_mode = reverse_mode
+        self._reversing = False  # hysteresis state, see _solve_generalized_velocity
         self._speed_profile = ""
         self._speed_scale = 1.0
         self._rotation_speed_scale = 1.0
@@ -219,6 +234,7 @@ class B2WZ1WholeBodyController:
         ).copy()
         self._gripper_target = float(GRIPPER_NOMINAL[0])
         self._active = False
+        self._reversing = False
         self._home_base_position = np.zeros(3, dtype=np.float64)
         self._home_base_rotation = np.eye(3, dtype=np.float64)
         self._desired_base_position = np.zeros(3, dtype=np.float64)
@@ -485,49 +501,89 @@ class B2WZ1WholeBodyController:
                 self._home_base_rotation[0, 0],
             )
         )
+        reversing = self._reversing
         if target_requires_driving and self.auto_drive:
             target_from_home_base = (
                 self._target_position[:2] - self._home_base_position[:2]
             )
+            # Reverse mode: with the target behind the current heading, back up
+            # instead of turning around. Decide from the CURRENT base frame so
+            # the choice tracks the robot as it moves.
+            base_position_now = self.data.xpos[self._base_body_id]
+            base_rotation_now = self.data.xmat[self._base_body_id].reshape(3, 3)
+            target_in_base = base_rotation_now.T @ (
+                self._target_position - base_position_now
+            )
+            target_angle = float(np.arctan2(target_in_base[1], target_in_base[0]))
+            # Hysteresis: once reversing, stay reversing until the target is
+            # clearly in the front half-plane (x > 0.10). The angle is
+            # ill-defined near the base center (atan2 noise flips +/-pi), so
+            # the exit uses the base-frame x coordinate instead.
+            if self.reverse_mode:
+                if self._reversing:
+                    self._reversing = target_in_base[0] <= 0.10
+                else:
+                    self._reversing = abs(target_angle) > REVERSE_ANGLE
+            else:
+                self._reversing = False
+            reversing = self._reversing
             home_tcp_heading = float(
                 np.arctan2(
                     self._home_tcp_position_base[1],
                     self._home_tcp_position_base[0],
                 )
             )
-            desired_yaw = (
-                float(
-                    np.arctan2(
-                        target_from_home_base[1],
-                        target_from_home_base[0],
+            if reversing:
+                # Keep the current heading; park the target at a backward
+                # reachable base-frame x so the arm works over its shoulder.
+                self._desired_base_rotation[:] = base_rotation_now
+                self._desired_base_position[:] = (
+                    self._target_position
+                    - base_rotation_now
+                    @ np.array([REVERSE_TARGET_X, 0.0, 0.0], dtype=np.float64)
+                )
+                self._desired_base_position[2] = (
+                    self._home_base_position[2]
+                    + np.clip(
+                        self.base_assist * target_delta_home[2],
+                        -0.04,
+                        0.04,
                     )
                 )
-                - home_tcp_heading
-            )
-            desired_yaw = home_yaw + self._wrap_angle(desired_yaw - home_yaw)
-            desired_tcp_relative = self._home_tcp_position_base.copy()
-            desired_tcp_relative[0] += 0.08
-            yaw_rotation = axis_angle_rotation(
-                np.array([0.0, 0.0, 1.0]),
-                desired_yaw - home_yaw,
-            )
-            self._desired_base_rotation[:] = (
-                yaw_rotation @ self._home_base_rotation
-            )
-            desired_tcp_offset_world = (
-                self._desired_base_rotation @ desired_tcp_relative
-            )
-            self._desired_base_position[:2] = (
-                self._target_position[:2] - desired_tcp_offset_world[:2]
-            )
-            self._desired_base_position[2] = (
-                self._home_base_position[2]
-                + np.clip(
-                    self.base_assist * target_delta_home[2],
-                    -0.04,
-                    0.04,
+            else:
+                desired_yaw = (
+                    float(
+                        np.arctan2(
+                            target_from_home_base[1],
+                            target_from_home_base[0],
+                        )
+                    )
+                    - home_tcp_heading
                 )
-            )
+                desired_yaw = home_yaw + self._wrap_angle(desired_yaw - home_yaw)
+                desired_tcp_relative = self._home_tcp_position_base.copy()
+                desired_tcp_relative[0] += 0.08
+                yaw_rotation = axis_angle_rotation(
+                    np.array([0.0, 0.0, 1.0]),
+                    desired_yaw - home_yaw,
+                )
+                self._desired_base_rotation[:] = (
+                    yaw_rotation @ self._home_base_rotation
+                )
+                desired_tcp_offset_world = (
+                    self._desired_base_rotation @ desired_tcp_relative
+                )
+                self._desired_base_position[:2] = (
+                    self._target_position[:2] - desired_tcp_offset_world[:2]
+                )
+                self._desired_base_position[2] = (
+                    self._home_base_position[2]
+                    + np.clip(
+                        self.base_assist * target_delta_home[2],
+                        -0.04,
+                        0.04,
+                    )
+                )
         else:
             local_base_shift = np.array(
                 [
@@ -590,11 +646,20 @@ class B2WZ1WholeBodyController:
                 base_rotation.T @ (self._target_position - base_position)
                 - self._home_tcp_position_base
             )
-            reachable_delta = np.clip(
-                target_from_home_current,
-                np.array([-0.12, -0.10, -0.14], dtype=np.float64),
-                np.array([0.16, 0.10, 0.14], dtype=np.float64),
-            )
+            if reversing:
+                # Backward reach: the arm works over its shoulder, so the TCP
+                # control point is clamped to the backward workspace.
+                reachable_delta = np.clip(
+                    target_from_home_current,
+                    REVERSE_REACHABLE_DELTA,
+                    REVERSE_REACHABLE_DELTA_HIGH,
+                )
+            else:
+                reachable_delta = np.clip(
+                    target_from_home_current,
+                    np.array([-0.12, -0.10, -0.14], dtype=np.float64),
+                    np.array([0.16, 0.10, 0.14], dtype=np.float64),
+                )
             control_tcp_position = base_position + base_rotation @ (
                 self._home_tcp_position_base + reachable_delta
             )
@@ -675,9 +740,17 @@ class B2WZ1WholeBodyController:
             self._site_jacobian(self._tcp_site_id)[:, self._optimized_dofs]
         )
         task_velocities.append(desired_tcp_twist)
-        task_weights.append(
-            np.array([18.0, 18.0, 18.0, 9.0, 9.0, 9.0], dtype=np.float64)
-        )
+        if reversing:
+            # Position-first in reverse: folding the arm backward rotates the
+            # TCP far from its home orientation, so the orientation task is
+            # relaxed to a weak preference and position wins.
+            task_weights.append(
+                np.array([18.0, 18.0, 18.0, 1.0, 1.0, 1.0], dtype=np.float64)
+            )
+        else:
+            task_weights.append(
+                np.array([18.0, 18.0, 18.0, 9.0, 9.0, 9.0], dtype=np.float64)
+            )
 
         posture_jacobian = np.zeros((18, 28), dtype=np.float64)
         posture_jacobian[:12, 6:18] = np.eye(12)

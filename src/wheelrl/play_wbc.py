@@ -239,6 +239,11 @@ def main() -> None:
         help="disable automatic wheel motion for targets outside arm reach",
     )
     parser.add_argument(
+        "--no-reverse",
+        action="store_true",
+        help="disable backward driving; turn around to face far targets",
+    )
+    parser.add_argument(
         "--target-offset",
         type=float,
         nargs=3,
@@ -327,6 +332,7 @@ def main() -> None:
             control_hz=args.control_hz,
             base_assist=args.base_assist,
             auto_drive=not args.no_auto_drive,
+            reverse_mode=not args.no_reverse,
             speed_profile=args.speed_profile,
         )
         if args.settle_seconds is None:

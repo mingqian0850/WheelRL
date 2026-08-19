@@ -186,3 +186,33 @@ def test_lateral_far_target_turns_base_and_converges() -> None:
     assert diagnostics.position_error < 0.025
     assert diagnostics.orientation_error < np.deg2rad(1.5)
     assert diagnostics.upright > 0.98
+
+
+def test_reverse_mode_backs_up_without_turning() -> None:
+    model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
+    data = mujoco.MjData(model)
+    controller = B2WZ1WholeBodyController(model, data)
+    controller.reset()
+    for _ in range(200):
+        controller.step()
+    controller.capture_reference()
+    # Target 1.0 m behind the TCP (behind the base): back up, do not turn.
+    controller.set_target_pose(
+        controller.home_tcp_position - np.array([1.0, 0.0, 0.0]),
+        controller.home_tcp_rotation,
+    )
+    base_rotation = data.xmat[controller._base_body_id].reshape(3, 3)
+    start_x = float(data.xpos[controller._base_body_id][0])
+    start_yaw = float(np.arctan2(base_rotation[1, 0], base_rotation[0, 0]))
+    diagnostics = None
+    for _ in range(700):
+        diagnostics = controller.step()
+    base_rotation = data.xmat[controller._base_body_id].reshape(3, 3)
+    base_yaw = float(np.arctan2(base_rotation[1, 0], base_rotation[0, 0]))
+    dx = float(data.xpos[controller._base_body_id][0]) - start_x
+    dyaw = (base_yaw - start_yaw + np.pi) % (2 * np.pi) - np.pi
+    assert dx < -0.20
+    assert abs(dyaw) < 0.6
+    assert diagnostics is not None
+    assert diagnostics.position_error < 0.06
+    assert diagnostics.upright > 0.9

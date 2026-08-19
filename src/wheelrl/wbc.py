@@ -52,6 +52,18 @@ ROTATION_SPEED_PROFILE_SCALES = {
     "fast": 1.50,
 }
 
+# Task-space loop gains. The desired twists are PD in task space:
+#   v_des = Kp * error - Kd * v_measured
+# The velocity feedback damps the overshoot that a pure P command produces
+# when the body carries momentum through the target.
+TCP_POS_GAIN = 3.0
+TCP_ORI_GAIN = 3.0
+TCP_VEL_DAMPING = 0.60
+BASE_VEL_DAMPING = 0.80
+# Arm servo gains are boosted locally (the RL envs keep their own tuning).
+ARM_KP_SCALE = 1.5
+ARM_KD_SCALE = 2.0
+
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
     """Return the SO(3) logarithm of a 3x3 rotation matrix."""
@@ -573,6 +585,7 @@ class B2WZ1WholeBodyController:
             )
             desired_base_twist[:3] *= self._speed_scale
             desired_base_twist[3:] *= self._rotation_speed_scale
+            desired_base_twist -= BASE_VEL_DAMPING * self.data.qvel[:6]
             target_from_home_current = (
                 base_rotation.T @ (self._target_position - base_position)
                 - self._home_tcp_position_base
@@ -622,6 +635,7 @@ class B2WZ1WholeBodyController:
             )
             desired_base_twist[:3] *= self._speed_scale
             desired_base_twist[3:] *= self._rotation_speed_scale
+            desired_base_twist -= BASE_VEL_DAMPING * self.data.qvel[:6]
             control_tcp_position = self._target_position
             control_tcp_rotation = self._target_rotation
         task_jacobians.append(
@@ -636,23 +650,27 @@ class B2WZ1WholeBodyController:
         task_weights.append(base_task_weights)
 
         tcp_rotation = self.tcp_rotation
+        # Task-space PD: brake with the measured TCP velocity so the body
+        # does not oscillate through the target.
+        tcp_velocity = self._site_jacobian(self._tcp_site_id) @ self.data.qvel
         desired_tcp_twist = np.concatenate(
             [
                 np.clip(
-                    2.0 * (control_tcp_position - self.tcp_position),
-                    -0.20,
-                    0.20,
+                    TCP_POS_GAIN * (control_tcp_position - self.tcp_position),
+                    -0.30,
+                    0.30,
                 ),
                 np.clip(
-                    2.0
+                    TCP_ORI_GAIN
                     * rotation_vector(control_tcp_rotation @ tcp_rotation.T),
-                    -0.40,
-                    0.40,
+                    -0.60,
+                    0.60,
                 ),
             ]
         )
         desired_tcp_twist[:3] *= self._speed_scale
         desired_tcp_twist[3:] *= self._rotation_speed_scale
+        desired_tcp_twist -= TCP_VEL_DAMPING * tcp_velocity
         task_jacobians.append(
             self._site_jacobian(self._tcp_site_id)[:, self._optimized_dofs]
         )
@@ -837,8 +855,8 @@ class B2WZ1WholeBodyController:
             self._wheel_velocity_target - wheel_velocity
         )
         torque[16:22] = (
-            ARM_KP * (self._joint_reference[12:] - arm_position)
-            - ARM_KD * arm_velocity
+            ARM_KP_SCALE * ARM_KP * (self._joint_reference[12:] - arm_position)
+            - ARM_KD_SCALE * ARM_KD * arm_velocity
             + self.data.qfrc_bias[self._arm_dof_adr]
         )
         torque[22] = (

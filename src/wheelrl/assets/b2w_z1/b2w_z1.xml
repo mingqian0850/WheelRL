@@ -172,15 +172,17 @@
                     <geom mesh="z1_link06_mesh" class="z1_visual"/>
                     <geom type="cylinder" size="0.0325 0.0255" pos="0.0255 0 0"
                       euler="0 1.570796327 0" class="z1_collision"/>
-                    <!-- Intel RealSense D435i (visual only): mounted on the
-                         wrist link at the joint5/joint6 junction, so it rolls
-                         with axis 6. At the Z1 initial pose the optical axis
-                         (camera z) points forward, the same direction as the
-                         dog's own head camera/lidar, and the image is upright
-                         (camera y = z1_link06 +z, world up at the initial
-                         pose). quat (0.5 0.5 0.5 0.5) maps local
-                         x->y, y->z, z->x of z1_link06. Camera "z1_cam". -->
-                    <body name="z1_camera" pos="0.005 0 -0.036">
+                    <!-- Intel RealSense D435i (visual only): mounted beside the
+                         wrist (y=+0.09) at the joint5/joint6 junction, so it
+                         rolls with axis 6. The side mount keeps the gripper
+                         fingers (which open in the x-z plane) and the forearm
+                         out of the image center. At the Z1 initial pose the
+                         optical axis (camera z) points forward, the same
+                         direction as the dog's own head camera/lidar, and the
+                         image is upright (camera y = z1_link06 +z, world up
+                         at the initial pose). quat (0.5 0.5 0.5 0.5) maps
+                         local x->y, y->z, z->x of z1_link06. Camera "z1_cam". -->
+                    <body name="z1_camera" pos="0.02 0.09 0">
                       <geom type="box" size="0.045 0.012 0.012" pos="0 0 0"
                         rgba="0.25 0.25 0.28 1" group="1"/>
                       <geom type="cylinder" size="0.006 0.008" pos="0.045 0 0"

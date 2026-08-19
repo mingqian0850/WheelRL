@@ -113,14 +113,15 @@
         group="1" density="0" rgba="0 0 0 1" mesh="r_oc_link" />
       <site name="imu" pos="0 -0.02341 0.04927" />
       <!--
-        Z1 is mounted at the center of the B2-W top deck (x=0), matching the
-        reference b2w_z1.urdf from aCodeDog/legged-robots-manipulation
-        (base_arm_joint0 origin xyz="0 0 0.056"); this keeps a ~0.34 m gap
-        from the lidar mount (unitree_ladar at x=0.342). z=0.105 is the deck
-        surface in this MJCF frame. The bracket transform should be replaced
-        by the measured one before sim-to-real work.
+        Z1 mount: the base-plate front edge (mesh z1_link00 extends to
+        x=+0.039 in the body frame) aligns with the front of the dog's main
+        body (base_link box front at x=0.25), so the mount origin sits at
+        x=0.25-0.039=0.211. This leaves a ~0.09 m gap to the lidar mount
+        (unitree_ladar at x=0.342). z=0.105 is the deck surface in this MJCF
+        frame. The bracket transform should be replaced by the measured one
+        before sim-to-real work.
       -->
-      <body name="z1_link00" pos="0.0 0 0.105" childclass="z1">
+      <body name="z1_link00" pos="0.211 0 0.105" childclass="z1">
         <inertial pos="-0.00334984 -0.00013615 0.02495843" mass="0.47247481"
           fullinertia="0.00037937 0.00041521 0.00053066 -0.00000035 -0.00001037 -0.00000099"/>
         <geom mesh="z1_link00_mesh" class="z1_visual"/>
@@ -173,17 +174,19 @@
                       euler="0 1.570796327 0" class="z1_collision"/>
                     <!-- Intel RealSense D435i (visual only): mounted on the
                          wrist link at the joint5/joint6 junction, so it rolls
-                         with axis 6. The camera frame is aligned with the TCP
-                         (z1_ee) frame: optical axis (camera z) parallel to the
-                         TCP z-axis and camera x parallel to the TCP x-axis
-                         (identity orientation in z1_link06, which is the TCP
-                         frame). Camera "z1_cam". -->
+                         with axis 6. At the Z1 initial pose the optical axis
+                         (camera z) points forward, the same direction as the
+                         dog's own head camera/lidar, and the image is upright
+                         (camera y = z1_link06 +z, world up at the initial
+                         pose). quat (0.5 0.5 0.5 0.5) maps local
+                         x->y, y->z, z->x of z1_link06. Camera "z1_cam". -->
                     <body name="z1_camera" pos="0.005 0 -0.036">
                       <geom type="box" size="0.045 0.012 0.012" pos="0 0 0"
                         rgba="0.25 0.25 0.28 1" group="1"/>
-                      <geom type="cylinder" size="0.006 0.008" pos="0 0 0.045"
-                        rgba="0.1 0.1 0.15 1" group="1"/>
-                      <camera name="z1_cam" pos="0 0 0.045" fovy="58"/>
+                      <geom type="cylinder" size="0.006 0.008" pos="0.045 0 0"
+                        euler="0 1.570796327 0" rgba="0.1 0.1 0.15 1" group="1"/>
+                      <camera name="z1_cam" pos="0.045 0 0"
+                        quat="0.5 0.5 0.5 0.5" fovy="58"/>
                     </body>
                     <body name="z1_gripper_stator" pos="0.051 0 0">
                       <inertial pos="0.04764427 -0.00035819 -0.00249162" mass="0.52603655"

@@ -36,12 +36,12 @@ from wheelrl.envs.b2w_z1 import B2WZ1Env
 FloatArray = NDArray[np.float64]
 
 # Reachable TCP position bounds in the base frame [m], per axis (low, high).
-# The Z1 workspace is wide (measured grid: x in [-0.88, 0.88], y in [-0.56,
+# The Z1 workspace is wide (measured grid: x in [-0.63, 1.09], y in [-0.56,
 # 0.56], z in [-0.26, 1.09]); the tracking target is confined to the working
-# zone around the nominal EE pose [0.43, 0.0, 0.68] so the arm stays in a
+# zone around the nominal EE pose [0.64, 0.0, 0.67] so the arm stays in a
 # comfortable region and the base is not forced to over-drive.
 EE_POS_BOUNDS = np.array(
-    [[0.05, 0.80], [-0.45, 0.45], [0.25, 1.00]], dtype=np.float64
+    [[0.28, 0.98], [-0.45, 0.45], [0.25, 1.00]], dtype=np.float64
 )
 # Maximum per-axis orientation offset [rad] at full curriculum.
 ORI_MAX = float(np.deg2rad(25.0))

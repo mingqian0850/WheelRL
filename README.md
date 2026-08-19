@@ -363,12 +363,10 @@ does not offset CPU-to-GPU transfer overhead.
 
 ## Important modeling boundary
 
-The arm is mounted at `x=0.0 m, y=0, z=0.105 m` relative to the B2-W base
-(the center of the top deck, ~0.34 m behind the lidar mount at `x=0.342`),
-matching the reference `b2w_z1.urdf` from
-[aCodeDog/legged-robots-manipulation](https://github.com/aCodeDog/legged-robots-manipulation)
-(`base_arm_joint0` origin `xyz="0 0 0.056"`). This is a documented simulation
-assumption. Before sim-to-real deployment, replace it with the measured
-bracket transform and update the combined mass/inertia calibration. The
-included policy is a research starting point, not
+The arm is mounted at `x=0.211 m, y=0, z=0.105 m` relative to the B2-W base,
+so the Z1 base-plate front edge aligns with the front of the dog's main body
+(`x=0.25`), leaving a ~0.09 m gap to the lidar mount (`x=0.342`). This is a
+documented simulation assumption. Before sim-to-real deployment, replace it
+with the measured bracket transform and update the combined mass/inertia
+calibration. The included policy is a research starting point, not
 a robot-ready safety controller.

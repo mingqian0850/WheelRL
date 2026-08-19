@@ -168,6 +168,18 @@
                     <geom mesh="z1_link06_mesh" class="z1_visual"/>
                     <geom type="cylinder" size="0.0325 0.0255" pos="0.0255 0 0"
                       euler="0 1.570796327 0" class="z1_collision"/>
+                    <!-- Intel RealSense D435i (visual only): mounted on the
+                         wrist link at the joint5/joint6 junction, so it rolls
+                         with axis 6. Simplified body: 90x25x25 mm box + lens.
+                         Camera "z1_cam" looks along +x of this body. -->
+                    <body name="z1_camera" pos="0.005 0 -0.036">
+                      <geom type="box" size="0.045 0.012 0.012" pos="0 0 0"
+                        rgba="0.25 0.25 0.28 1" group="1"/>
+                      <geom type="cylinder" size="0.006 0.008" pos="0.045 0 0"
+                        euler="0 1.570796327 0" rgba="0.1 0.1 0.15 1" group="1"/>
+                      <camera name="z1_cam" pos="0.045 0 0"
+                        euler="0 1.570796327 0" fovy="58"/>
+                    </body>
                     <body name="z1_gripper_stator" pos="0.051 0 0">
                       <inertial pos="0.04764427 -0.00035819 -0.00249162" mass="0.52603655"
                         fullinertia="0.00038683 0.00068614 0.00066293 -0.00000359 0.00007662 0.00000209"/>

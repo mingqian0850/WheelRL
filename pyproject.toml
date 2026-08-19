@@ -31,8 +31,10 @@ wheelrl-eval-door = "wheelrl.eval_door:main"
 wheelrl-play = "wheelrl.play:main"
 wheelrl-play-door = "wheelrl.play_door:main"
 wheelrl-play-wbc = "wheelrl.play_wbc:main"
+wheelrl-play-track = "wheelrl.play_track:main"
 wheelrl-train = "wheelrl.train:main"
 wheelrl-train-door = "wheelrl.train_door:main"
+wheelrl-train-track = "wheelrl.train_track:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wheelrl"]

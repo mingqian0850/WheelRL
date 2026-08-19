@@ -218,6 +218,38 @@ The environment ID is `WheelRL-B2WZ1Grip-v0`. Checkpoints produced by the
 earlier 22-action/no-gripper environment are intentionally kept separate and
 cannot be loaded into this 23-action environment.
 
+## Task-space TCP tracking training
+
+`B2WZ1TrackEnv` (`wheelrl-train-track`) is an RFM-inspired task-space variant
+of the base environment: the policy must drive the whole body -- wheels, legs
+and arm -- so the Z1 TCP tracks a *moving* 6-DoF pose target in the base
+frame. The 86-dimensional observation adds the TCP orientation error
+(rotation vector) and the target velocity to the 80-dim base observation.
+
+```bash
+# smoke run
+wheelrl-train-track --timesteps 16384 --n-envs 2 --device cpu \
+  --curriculum 0.5 --motion 0.5 --run-dir runs/track_smoke
+```
+
+Recommended first real run for this machine:
+
+```bash
+wheelrl-train-track --timesteps 2000000 --n-envs 8 --device cpu \
+  --curriculum 1.0 --motion 1.0
+```
+
+- `--curriculum 0..1` scales the initial position offset and orientation
+  offset of the TCP target at reset (0 = hold the current pose).
+- `--motion 0..1` scales the peak target speed (0.10 * motion m/s); the
+  target reflects at the reachable-workspace bounds so it stays inside the
+  working zone.
+- The base velocity command is disabled; forward motion must emerge from the
+  wheel actions coordinated with the arm.
+- The reward includes position and orientation tracking terms plus a
+  multiplicative "sync gate" (a light reward-fusion step) so both pose parts
+  must be satisfied together.
+
 ## Pull-door training
 
 The door task uses a hierarchical nine-dimensional action:

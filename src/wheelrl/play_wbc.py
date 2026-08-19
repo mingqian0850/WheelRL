@@ -213,7 +213,12 @@ def _run_settle(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--seconds",
+        type=float,
+        default=120.0,
+        help="run duration in seconds; 0 runs until the viewer/window closes",
+    )
     parser.add_argument(
         "--settle-seconds",
         type=float,
@@ -392,7 +397,11 @@ def main() -> None:
         else:
             _print_pose(controller)
 
-        deadline = time.monotonic() + args.seconds
+        deadline = (
+            float("inf")
+            if args.seconds <= 0.0
+            else time.monotonic() + args.seconds
+        )
         next_report = time.monotonic() + 1.0
         next_ui_update = time.monotonic()
         keep_running = True

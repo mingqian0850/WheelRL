@@ -88,6 +88,40 @@ wheelrl-train-door --resume-model <model.zip> --resume-stats <vecnormalize.pkl> 
 wheelrl-train      --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
 ```
 
+### Sharing trained checkpoints (e.g. to the 4090 machine)
+
+`runs/` is gitignored (only the verified full-task door checkpoint is kept in
+Git), so `git pull` does **not** fetch trained policies. Published policies are
+distributed as GitHub Release assets instead, one zip per run directory
+(contains `final_model.zip` + `vecnormalize.pkl`):
+
+```bash
+# on the target machine, inside a WheelRL clone
+gh release download track-policies-v1 --clobber
+unzip -o track_ppo_v3.zip -d runs/
+unzip -o track_ppo_v4.zip -d runs/
+```
+
+No `gh` login? Download the zips from the release page directly
+(<https://github.com/mingqian0850/WheelRL/releases>) and unzip them into
+`runs/`. Play the policy as usual:
+
+```bash
+wheelrl-play-track --model runs/track_ppo_v4/final_model.zip \
+  --stats runs/track_ppo_v4/vecnormalize.pkl --seconds 0 --motion 0.5
+```
+
+To publish a new policy, zip the run directory and upload it as a release
+asset (or commit it like the door checkpoint if it is the verified final one):
+
+```bash
+cd runs && zip -r track_ppo_vX.zip track_ppo_vX/final_model.zip track_ppo_vX/vecnormalize.pkl
+gh release create track-policies-v2 track_ppo_vX.zip --title "Track policies v2"
+```
+
+Note: `scp` from this WSL machine usually does not work for other machines,
+because WSL uses a NAT address that changes on reboot.
+
 ## Verify and view the robot
 
 Headless model and API check:

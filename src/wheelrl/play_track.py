@@ -91,8 +91,12 @@ def main() -> None:
 
     temp_scene = _build_scene_with_markers()
     try:
+        # render_mode is always None: the play script owns the (single) viewer
+        # below; an env render_mode of "human" would open a second passive
+        # viewer from env.step(), and two viewers on one context close each
+        # other.
         env = B2WZ1TrackEnv(
-            render_mode=None if args.headless else "human",
+            render_mode=None,
             tracking_curriculum=args.curriculum,
             target_motion=args.motion,
             _model_filename=temp_scene.name,

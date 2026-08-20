@@ -30,3 +30,6 @@ retract_solution.c
 src/wheelrl/assets/b2w_z1/mpc/codegen/solver_function.c
 src/wheelrl/assets/b2w_z1/mpc/codegen/build/
 src/wheelrl/assets/b2w_z1/mpc/codegen/lib/
+
+# play-track 注入标记的临时场景（异常退出时可能残留）
+src/wheelrl/assets/b2w_z1/tmp*.xml

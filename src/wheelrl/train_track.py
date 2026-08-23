@@ -24,6 +24,7 @@ from wheelrl.runtime import default_run_dir, write_run_metadata
 def make_env(
     seed: int, rank: int, curriculum: float, motion: float,
     randomization: float, orientation_weight: float, pose_curriculum: float,
+    ik_curriculum: float,
 ):
     def _factory():
         env = B2WZ1TrackEnv(
@@ -32,6 +33,7 @@ def make_env(
             randomization=randomization,
             orientation_weight=orientation_weight,
             pose_curriculum=pose_curriculum,
+            ik_curriculum=ik_curriculum,
         )
         env.reset(seed=seed + rank)
         return Monitor(env)
@@ -50,6 +52,12 @@ def main() -> None:
         type=float,
         default=1.0,
         help="tracking curriculum 0..1: initial EE offset/orientation magnitude",
+    )
+    parser.add_argument(
+        "--ik-curriculum",
+        type=float,
+        default=1.0,
+        help="analytic IK feedforward 0=off .. 1=full (learn to stabilize first)",
     )
     parser.add_argument(
         "--pose-curriculum",
@@ -106,6 +114,7 @@ def main() -> None:
         make_env(
             args.seed, rank, args.curriculum, args.motion,
             args.randomization, args.orientation_weight, args.pose_curriculum,
+            args.ik_curriculum,
         )
         for rank in range(args.n_envs)
     ]
@@ -127,7 +136,8 @@ def main() -> None:
         DummyVecEnv(
             [make_env(
                 args.seed + 10_000, 0, args.curriculum, args.motion,
-                args.randomization, args.orientation_weight, args.pose_curriculum
+                args.randomization, args.orientation_weight, args.pose_curriculum,
+                args.ik_curriculum
             )]
         ),
         norm_obs=True,

@@ -8,7 +8,7 @@ def test_track_env_spaces_and_step() -> None:
     env = B2WZ1TrackEnv(tracking_curriculum=1.0, target_motion=1.0)
     try:
         observation, info = env.reset(seed=1)
-        assert observation.shape == (86,)
+        assert observation.shape == (92,)
         assert env.action_space.shape == (23,)
         # The actual velocity ramps up smoothly from zero after reset.
         assert info["target_speed"] == 0.0
@@ -21,7 +21,7 @@ def test_track_env_spaces_and_step() -> None:
         observation, reward, terminated, truncated, info = env.step(
             np.zeros(23, dtype=np.float32)
         )
-        assert observation.shape == (86,)
+        assert observation.shape == (92,)
         assert np.isfinite(observation).all()
         assert np.isfinite(reward)
         assert "ee_orientation_error" in info

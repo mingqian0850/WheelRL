@@ -9,9 +9,9 @@ curriculum scales the initial offset, orientation error, and target speed.
 
 Differences from :class:`B2WZ1Env`:
 
-- the observation is 86-dimensional: the 80-dim base observation plus the
-  TCP orientation error (rotation vector, 3) and the target velocity in the
-  base frame (3);
+- the observation is 92-dimensional: the 80-dim base observation plus the
+  TCP orientation error (rotation vector, 3), the target velocity in the
+  base frame (3), and the smoothed analytic IK feedforward (6);
 - the reward adds an orientation-tracking term and a multiplicative
   "sync gate" (a light RFM-style nonlinear fusion) so position and
   orientation must be satisfied together, not additively traded off;
@@ -31,7 +31,7 @@ import numpy as np
 from gymnasium import spaces
 from numpy.typing import NDArray
 
-from wheelrl.envs.b2w_z1 import ARM_NOMINAL, B2WZ1Env
+from wheelrl.envs.b2w_z1 import ARM_KP, ARM_NOMINAL, B2WZ1Env
 
 FloatArray = NDArray[np.float64]
 
@@ -66,6 +66,17 @@ JOINT_MARGIN_MIN = 0.20  # rad, penalty starts below this distance to a limit
 JOINT_MARGIN_WEIGHT = 2.0
 MANIP_MIN = 0.15         # smallest arm-Jacobian singular value threshold
 MANIP_WEIGHT = 0.05
+# --- analytic IK feedforward + policy residual ------------------------------
+# The arm joints receive a per-step DLS IK correction toward the TCP target;
+# the policy only learns residual corrections (scale below), so tracking
+# precision comes from the IK, coordination/stability from the policy.
+IK_GAIN = 0.15       # IK correction gain (rad per unit error)
+IK_LAMBDA = 0.05**2  # DLS damping
+IK_CLIP = 0.30        # max joint correction [rad]
+IK_ORI_WEIGHT = 0.0   # orientation NOT in the IK (aCodeDog recipe):
+                        # position precision from IK, orientation from the policy
+IK_SMOOTHING = 0.3    # low-pass factor for the smoothed IK offset
+ARM_RESIDUAL_SCALE = 0.35  # arm action scale for the residual policy
 
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
@@ -126,6 +137,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         randomization: float = 0.0,
         orientation_weight: float = 0.6,
         pose_curriculum: float = 1.0,
+        ik_curriculum: float = 1.0,
         _model_filename: str = "scene.xml",
     ) -> None:
         super().__init__(
@@ -139,8 +151,9 @@ class B2WZ1TrackEnv(B2WZ1Env):
         self.randomization = float(np.clip(randomization, 0.0, 1.0))
         self.orientation_weight = float(orientation_weight)
         self.pose_curriculum = float(np.clip(pose_curriculum, 0.0, 1.0))
+        self.ik_curriculum = float(np.clip(ik_curriculum, 0.0, 1.0))
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(86,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(92,), dtype=np.float32
         )
 
         self._ee_target_rpy = np.zeros(3, dtype=np.float64)
@@ -161,6 +174,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         self._nominal_floor_friction = self.model.geom_friction[self._floor_geom_id].copy()
         self._pd_scale = 1.0
         self._arm_ranges = self.model.jnt_range[self._joint_ids[16:22]].copy()
+        self._ik_smoothed = np.zeros(6, dtype=np.float64)
 
     # ------------------------------------------------------------ task space
     def _current_ee_rotation_base(self) -> FloatArray:
@@ -243,6 +257,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
             self._pd_scale = float(
                 1.0 + self.np_random.uniform(-PD_RANGE, PD_RANGE) * scale
             )
+            self._ik_smoothed.fill(0.0)
             # Initial arm-pose randomization, interpolated between the nominal
             # pose (pose_curriculum=0) and the full joint ranges
             # (pose_curriculum=1): the policy must stabilize from
@@ -305,14 +320,70 @@ class B2WZ1TrackEnv(B2WZ1Env):
                 base_observation,
                 self._ee_orientation_error(),
                 self._ee_vel,
+                self._ik_smoothed,
             ]
         )
         return extended.astype(np.float32)
 
+    # ------------------------------------------------------------------- IK
+    def _arm_jacobian(self) -> FloatArray:
+        """6x6 arm Jacobian: EE twist relative to the base, in the base frame."""
+        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self._ee_site_id)
+        jacp_base = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr_base = np.zeros((3, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacBody(
+            self.model, self.data, jacp_base, jacr_base, self._base_body_id
+        )
+        rotation = self._base_rotation()
+        jacobian = np.vstack(
+            [
+                rotation.T @ (jacp - jacp_base),
+                rotation.T @ (jacr - jacr_base),
+            ]
+        )
+        return jacobian[:, self._dof_adr[16:22]]
+
+    def _arm_ik_offset(self) -> FloatArray:
+        """Damped-least-squares arm IK correction toward the TCP target.
+
+        Analytic feedforward (same formula as wb-mpc/aCodeDog control_ik):
+        the arm joints are nudged every step so the *exact* tracking comes
+        from the IK, while the policy only learns residual corrections
+        (coordination, stability). Without this the end-to-end policy settles
+        at ~10 cm error where the reward surface is flat.
+        """
+        position_error = self._ee_target_base - self._current_ee_base()
+        orientation_error = IK_ORI_WEIGHT * self._ee_orientation_error()
+        dpose = np.concatenate([position_error, orientation_error])
+        jacobian = self._arm_jacobian()
+        damping = IK_LAMBDA * np.eye(6, dtype=np.float64)
+        offset = jacobian.T @ np.linalg.solve(
+            jacobian @ jacobian.T + damping, dpose
+        )
+        offset = np.clip(IK_GAIN * offset, -IK_CLIP, IK_CLIP)
+        # Low-pass so the target shift is smooth despite the soft arm PD.
+        self._ik_smoothed += IK_SMOOTHING * (offset - self._ik_smoothed)
+        return self.ik_curriculum * self._ik_smoothed
+
     def _compute_torque(self, action: FloatArray) -> FloatArray:
-        torque = super()._compute_torque(action)
+        # The arm actions are residuals around the analytic IK feedforward.
+        # Residual authority ramps with the IK curriculum: full arm control
+        # while learning to stabilize (ik off), tighter residuals once the
+        # analytic IK is active.
+        residual_scale = 1.0 - (1.0 - ARM_RESIDUAL_SCALE) * self.ik_curriculum
+        residual_action = np.asarray(action, dtype=np.float64).copy()
+        residual_action[16:22] *= residual_scale
+        torque = super()._compute_torque(residual_action)
         if self._pd_scale != 1.0:
             torque = torque * self._pd_scale
+        # IK feedforward (gated by uprightness so recovery is not fought).
+        upright = float(
+            np.clip(self.data.xmat[self._base_body_id].reshape(3, 3)[2, 2], -1.0, 1.0)
+        )
+        ik_gate = float(np.clip((upright - 0.45) / 0.45, 0.0, 1.0))
+        torque[16:22] += ARM_KP * self._arm_ik_offset() * ik_gate
         return torque
 
     def _reward(

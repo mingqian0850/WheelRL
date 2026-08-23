@@ -18,11 +18,12 @@ from wheelrl.envs.b2w_z1_hier import B2WZ1HierEnv
 from wheelrl.runtime import default_run_dir, write_run_metadata
 
 
-def make_env(seed: int, rank: int, curriculum: float, randomization: float):
+def make_env(seed: int, rank: int, curriculum: float, randomization: float, action_penalty: float):
     def _factory():
         env = B2WZ1HierEnv(
             tracking_curriculum=curriculum,
             randomization=randomization,
+            action_penalty=action_penalty,
         )
         env.reset(seed=seed + rank)
         return Monitor(env)
@@ -38,6 +39,13 @@ def main() -> None:
     parser.add_argument("--device", default="cpu", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--curriculum", type=float, default=1.0)
     parser.add_argument("--randomization", type=float, default=1.0)
+    parser.add_argument(
+        "--action-penalty",
+        type=float,
+        default=0.5,
+        help="reward penalty on mean(action^2); kills the ~25 mm "
+        "steady-state residual offset (default 0.5)",
+    )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--resume-model", type=Path)
     parser.add_argument("--resume-stats", type=Path)
@@ -48,7 +56,7 @@ def main() -> None:
     args.run_dir.mkdir(parents=True, exist_ok=True)
 
     env_fns = [
-        make_env(args.seed, rank, args.curriculum, args.randomization)
+        make_env(args.seed, rank, args.curriculum, args.randomization, args.action_penalty)
         for rank in range(args.n_envs)
     ]
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
@@ -63,7 +71,15 @@ def main() -> None:
         )
     eval_env = VecNormalize(
         DummyVecEnv(
-            [make_env(args.seed + 10_000, 0, args.curriculum, args.randomization)]
+            [
+                make_env(
+                    args.seed + 10_000,
+                    0,
+                    args.curriculum,
+                    args.randomization,
+                    args.action_penalty,
+                )
+            ]
         ),
         norm_obs=True,
         norm_reward=False,

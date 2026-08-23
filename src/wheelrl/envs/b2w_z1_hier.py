@@ -54,6 +54,7 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         max_episode_steps: int = 1000,
         tracking_curriculum: float = 1.0,
         randomization: float = 1.0,
+        action_penalty: float = 0.5,
         model: mujoco.MjModel | None = None,
         data: mujoco.MjData | None = None,
     ) -> None:
@@ -61,6 +62,12 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         self.max_episode_steps = max_episode_steps
         self.tracking_curriculum = float(np.clip(tracking_curriculum, 0.0, 1.0))
         self.randomization = float(np.clip(randomization, 0.0, 1.0))
+        # Penalize |action|^2 so the residual only moves the servo target when
+        # it genuinely helps (unreachable commands, transients). Without it the
+        # reward is flat within ~±2 cm and PPO settles at an arbitrary
+        # self-consistent nonzero residual, which shows up as a ~25 mm
+        # steady-state tracking offset.
+        self.action_penalty = float(np.clip(action_penalty, 0.0, 5.0))
 
         if model is None or data is None:
             model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
@@ -200,6 +207,9 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         terms["action_rate_penalty"] = -0.01 * float(
             np.mean(np.square(np.asarray(action, float) - self._last_action))
         )
+        terms["action_magnitude_penalty"] = -self.action_penalty * float(
+            np.mean(np.square(np.asarray(action, float)))
+        )
         reward = (
             1.0 * terms["command_position"]
             + 0.6 * terms["command_orientation"]
@@ -209,6 +219,7 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
             + terms["height_penalty"]
             + terms["energy_penalty"]
             + terms["action_rate_penalty"]
+            + terms["action_magnitude_penalty"]
         )
         upright = float(np.clip(self.data.xmat[self._base_body_id].reshape(3, 3)[2, 2], -1.0, 1.0))
         healthy = bool(

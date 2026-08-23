@@ -35,6 +35,7 @@ class B2WZ1HierController:
         stats_path: Path,
         control_hz: float = 100.0,
         auto_drive: bool = True,
+        residual_scale: float = 1.0,
         device: str = "cpu",
     ) -> None:
         self.model = model
@@ -66,6 +67,9 @@ class B2WZ1HierController:
         # without changing the steady-state behavior.
         self._residual_smoothed = np.zeros(6, dtype=np.float64)
         self._residual_smoothing = 0.30
+        # 0 = servo the user command directly (WBC-level precision, ~1-3 mm);
+        # 1 = full RL residual correction (trained behavior, ~25 mm offset).
+        self.residual_scale = float(residual_scale)
 
     # ------------------------------------------------------------ pose state
     @property
@@ -211,7 +215,7 @@ class B2WZ1HierController:
             self.env._command_pos_world.copy(),
             self.env._command_rotation_world.copy(),
         )
-        self.env.step(self._residual_smoothed)
+        self.env.step(self.residual_scale * self._residual_smoothed)
         return self.diagnostics()
 
     def diagnostics(self) -> WBCDiagnostics:

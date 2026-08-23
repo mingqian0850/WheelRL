@@ -282,6 +282,15 @@ def main() -> None:
     parser.add_argument("--hier-model", type=Path)
     parser.add_argument("--hier-stats", type=Path)
     parser.add_argument(
+        "--hier-residual-scale",
+        type=float,
+        default=1.0,
+        help="scales the RL residual before it shifts the WBC servo target "
+        "(default 1.0 = trained behavior with its ~25 mm steady-state "
+        "offset; 0.0 = servo the panel command directly, WBC-level "
+        "precision ~0.3 mm / 0.01 deg)",
+    )
+    parser.add_argument(
         "--panel-port",
         type=int,
         default=8765,
@@ -310,12 +319,15 @@ def main() -> None:
             policy_path=args.hier_model,
             stats_path=args.hier_stats,
             auto_drive=not args.no_auto_drive,
+            residual_scale=args.hier_residual_scale,
         )
         # The hier env already settles 0.3 s and captures the reference.
         args.settle_seconds = 0.0
         print(
             "Hierarchical controller: RL residual targets over the 100 Hz "
-            "WBC servo. Commanded pose from the panel; precision from the WBC."
+            "WBC servo. Commanded pose from the panel; precision from the WBC. "
+            f"Residual scale: {args.hier_residual_scale:g} "
+            "(0 = pure WBC precision)."
         )
     elif args.controller == "mpc":
         # casadi/pinocchio live in the separate 'wheelrl-mpc' environment;

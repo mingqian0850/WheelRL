@@ -228,6 +228,8 @@ class B2WZ1WholeBodyController:
         self._target_mocap_id = (
             int(model.body_mocapid[target_body_id]) if target_body_id >= 0 else -1
         )
+        # Optional (pose, rotation) override for the displayed target marker.
+        self._marker_pose: tuple[FloatArray, FloatArray] | None = None
 
         self._joint_reference = np.concatenate(
             [WBC_STAND_LEG_NOMINAL, ARM_NOMINAL]
@@ -428,9 +430,15 @@ class B2WZ1WholeBodyController:
     def _update_target_marker(self) -> None:
         if self._target_mocap_id < 0:
             return
-        self.data.mocap_pos[self._target_mocap_id] = self._target_position
+        # _marker_pose overrides the displayed pose (used by the hierarchical
+        # controller so the triad never shows the RL residual target).
+        if self._marker_pose is not None:
+            position, rotation = self._marker_pose
+        else:
+            position, rotation = self._target_position, self._target_rotation
+        self.data.mocap_pos[self._target_mocap_id] = position
         quaternion = np.empty(4, dtype=np.float64)
-        mujoco.mju_mat2Quat(quaternion, self._target_rotation.ravel())
+        mujoco.mju_mat2Quat(quaternion, np.asarray(rotation, dtype=float).ravel())
         self.data.mocap_quat[self._target_mocap_id] = quaternion
 
     def _body_jacobian(self, body_id: int) -> FloatArray:

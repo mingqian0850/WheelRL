@@ -205,16 +205,13 @@ class B2WZ1HierController:
         self._residual_smoothed += self._residual_smoothing * (
             self._last_action - self._residual_smoothed
         )
+        # The marker override is set BEFORE the servo step, so the triad
+        # never contains the (residual) servo target at any render point.
+        self.wbc._marker_pose = (
+            self.env._command_pos_world.copy(),
+            self.env._command_rotation_world.copy(),
+        )
         self.env.step(self._residual_smoothed)
-        # The marker (mocap triad) shows the USER's commanded pose, which is
-        # stable; the servo target (command + smoothed residual) is internal
-        # and is refreshed at the next step anyway.
-        self.wbc._target_position[:] = self.env._command_pos_world
-        self.wbc._target_rotation[:] = self.env._command_rotation_world
-        # The viewer renders data.mocap_pos/quat, which wbc.step() already
-        # wrote from the (residual) servo target. Rewrite the marker from the
-        # stable command pose so the triad does not shake.
-        self.wbc._update_target_marker()
         return self.diagnostics()
 
     def diagnostics(self) -> WBCDiagnostics:

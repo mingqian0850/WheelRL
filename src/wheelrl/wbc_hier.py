@@ -211,6 +211,10 @@ class B2WZ1HierController:
         # and is refreshed at the next step anyway.
         self.wbc._target_position[:] = self.env._command_pos_world
         self.wbc._target_rotation[:] = self.env._command_rotation_world
+        # The viewer renders data.mocap_pos/quat, which wbc.step() already
+        # wrote from the (residual) servo target. Rewrite the marker from the
+        # stable command pose so the triad does not shake.
+        self.wbc._update_target_marker()
         return self.diagnostics()
 
     def diagnostics(self) -> WBCDiagnostics:

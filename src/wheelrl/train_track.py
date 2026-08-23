@@ -24,7 +24,7 @@ from wheelrl.runtime import default_run_dir, write_run_metadata
 def make_env(
     seed: int, rank: int, curriculum: float, motion: float,
     randomization: float, orientation_weight: float, pose_curriculum: float,
-    ik_curriculum: float,
+    ik_curriculum: float, ik_gain: float,
 ):
     def _factory():
         env = B2WZ1TrackEnv(
@@ -34,6 +34,7 @@ def make_env(
             orientation_weight=orientation_weight,
             pose_curriculum=pose_curriculum,
             ik_curriculum=ik_curriculum,
+            ik_gain=ik_gain,
         )
         env.reset(seed=seed + rank)
         return Monitor(env)
@@ -52,6 +53,12 @@ def main() -> None:
         type=float,
         default=1.0,
         help="tracking curriculum 0..1: initial EE offset/orientation magnitude",
+    )
+    parser.add_argument(
+        "--ik-gain",
+        type=float,
+        default=0.15,
+        help="analytic IK feedforward gain; ramp it inside the curriculum",
     )
     parser.add_argument(
         "--ik-curriculum",
@@ -114,7 +121,7 @@ def main() -> None:
         make_env(
             args.seed, rank, args.curriculum, args.motion,
             args.randomization, args.orientation_weight, args.pose_curriculum,
-            args.ik_curriculum,
+            args.ik_curriculum, args.ik_gain,
         )
         for rank in range(args.n_envs)
     ]
@@ -137,7 +144,7 @@ def main() -> None:
             [make_env(
                 args.seed + 10_000, 0, args.curriculum, args.motion,
                 args.randomization, args.orientation_weight, args.pose_curriculum,
-                args.ik_curriculum
+                args.ik_curriculum, args.ik_gain
             )]
         ),
         norm_obs=True,

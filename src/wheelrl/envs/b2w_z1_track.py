@@ -138,6 +138,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         orientation_weight: float = 0.6,
         pose_curriculum: float = 1.0,
         ik_curriculum: float = 1.0,
+        ik_gain: float = IK_GAIN,
         _model_filename: str = "scene.xml",
     ) -> None:
         super().__init__(
@@ -152,6 +153,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         self.orientation_weight = float(orientation_weight)
         self.pose_curriculum = float(np.clip(pose_curriculum, 0.0, 1.0))
         self.ik_curriculum = float(np.clip(ik_curriculum, 0.0, 1.0))
+        self.ik_gain = float(ik_gain)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(92,), dtype=np.float32
         )
@@ -362,7 +364,7 @@ class B2WZ1TrackEnv(B2WZ1Env):
         offset = jacobian.T @ np.linalg.solve(
             jacobian @ jacobian.T + damping, dpose
         )
-        offset = np.clip(IK_GAIN * offset, -IK_CLIP, IK_CLIP)
+        offset = np.clip(self.ik_gain * offset, -IK_CLIP, IK_CLIP)
         # Low-pass so the target shift is smooth despite the soft arm PD.
         self._ik_smoothed += IK_SMOOTHING * (offset - self._ik_smoothed)
         return self.ik_curriculum * self._ik_smoothed

@@ -60,6 +60,12 @@ class B2WZ1HierController:
         self._rotation_speed_scale = 1.0
         self._active = False
         self._last_action = np.zeros(6, dtype=np.float64)
+        # Low-passed residual: the raw policy output jumps ~20 mm per 50 Hz
+        # step (sensitive to obs noise), which makes the commanded target and
+        # its marker visibly shake. Smoothing keeps the servo target calm
+        # without changing the steady-state behavior.
+        self._residual_smoothed = np.zeros(6, dtype=np.float64)
+        self._residual_smoothing = 0.30
 
     # ------------------------------------------------------------ pose state
     @property
@@ -196,7 +202,15 @@ class B2WZ1HierController:
         normalized = self._stats.normalize_obs(np.asarray(observation)[None])[0]
         action, _ = self.policy.predict(normalized, deterministic=True)
         self._last_action[:] = np.asarray(action, dtype=float)
-        self.env.step(self._last_action)
+        self._residual_smoothed += self._residual_smoothing * (
+            self._last_action - self._residual_smoothed
+        )
+        self.env.step(self._residual_smoothed)
+        # The marker (mocap triad) shows the USER's commanded pose, which is
+        # stable; the servo target (command + smoothed residual) is internal
+        # and is refreshed at the next step anyway.
+        self.wbc._target_position[:] = self.env._command_pos_world
+        self.wbc._target_rotation[:] = self.env._command_rotation_world
         return self.diagnostics()
 
     def diagnostics(self) -> WBCDiagnostics:

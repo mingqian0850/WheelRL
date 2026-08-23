@@ -35,6 +35,7 @@ wheelrl-play-track = "wheelrl.play_track:main"
 wheelrl-train = "wheelrl.train:main"
 wheelrl-train-door = "wheelrl.train_door:main"
 wheelrl-train-track = "wheelrl.train_track:main"
+wheelrl-train-hier = "wheelrl.train_hier:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wheelrl"]

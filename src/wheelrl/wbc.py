@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,6 +77,26 @@ REVERSE_TARGET_X = -0.05  # m, base-frame x of the target when parked
 REVERSE_REACHABLE_DELTA = np.array([-0.80, -0.10, -0.14], dtype=np.float64)
 REVERSE_REACHABLE_DELTA_HIGH = np.array([-0.05, 0.10, 0.14], dtype=np.float64)
 
+# Arm-first (macro-micro) mode: the 6-DOF arm serves the TCP alone while the
+# base holds still; the base drives only when the arm demonstrably cannot
+# reach the target. Reachability is decided by the arm-only servo error, so
+# joint limits and workspace shape are handled automatically (the Z1 workspace
+# is highly asymmetric and not a box in base coordinates).
+ARM_FIRST_EXIT_ERROR = 0.08  # m: arm-only TCP error that means "unreachable"
+ARM_FIRST_EXIT_STEPS = 50  # 0.5 s at 100 Hz before handing off to the base
+ARM_FIRST_ENTER_ERROR = 0.015  # m: arm-only IK achievable error to re-engage
+ARM_FIRST_ENTER_ORI = 0.02  # rad: arm-only IK achievable orientation error
+ARM_FIRST_ENTER_STEPS = 20  # consecutive good steps before re-engaging
+ARM_FIRST_BASE_SETTLE = 0.03  # m: max planar base error at re-engage
+ARM_FIRST_BASE_SETTLE_YAW = 0.02  # rad: max yaw error at re-engage
+# The Z1's fourth joint is locked in this model, so the arm has five
+# effective dofs and cannot serve arbitrary SE(3): a target position is
+# sometimes reachable only with the wrong orientation. Detect that stall
+# (arm at the position, orientation stuck) and hand off to the base, whose
+# yaw can help satisfy the orientation.
+ARM_FIRST_STALL_POS = 0.05  # m: arm is at the target position...
+ARM_FIRST_STALL_ORI = 0.12  # rad: ...but the orientation is stuck
+
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
     """Return the SO(3) logarithm of a 3x3 rotation matrix."""
@@ -148,6 +169,7 @@ class WBCDiagnostics:
     max_torque: float
     mobile_base_active: bool
     base_goal_distance: float
+    arm_only: bool = False
 
 
 class B2WZ1WholeBodyController:
@@ -171,6 +193,7 @@ class B2WZ1WholeBodyController:
         auto_drive: bool = True,
         reverse_mode: bool = True,
         speed_profile: str = "normal",
+        arm_first: bool = True,
     ) -> None:
         self.model = model
         self.data = data
@@ -183,6 +206,18 @@ class B2WZ1WholeBodyController:
         self.auto_drive = auto_drive
         self.reverse_mode = reverse_mode
         self._reversing = False  # hysteresis state, see _solve_generalized_velocity
+        # Macro-micro decoupling: when the arm can serve the target alone the
+        # base is locked (precision); otherwise the base drives (coverage).
+        self.arm_first = bool(arm_first)
+        self.arm_only_active = False
+        self._arm_exit_counter = 0
+        self._arm_enter_counter = 0
+        # Arm stall recovery: blend the reference back to the canonical
+        # config, from which the servo is known to converge.
+        self._arm_stall_counter = 0
+        self._replan_target: FloatArray | None = None
+        self._replan_folded = False
+        self._arm_error_window: deque[float] = deque(maxlen=30)
         self._speed_profile = ""
         self._speed_scale = 1.0
         self._rotation_speed_scale = 1.0
@@ -465,6 +500,130 @@ class B2WZ1WholeBodyController:
         )
         return np.vstack([jacobian_position, jacobian_rotation])
 
+    def _arm_ik_from(
+        self,
+        q0: FloatArray,
+        position: FloatArray,
+        rotation: FloatArray,
+        iterations: int,
+    ) -> tuple[FloatArray, float, float]:
+        """Run arm-only DLS IK from an initial qpos; return (q, pos, ori)."""
+        saved_qpos = self.data.qpos.copy()
+        q = q0.copy()
+        jacobian = np.zeros((6, self.model.nv))
+        for _ in range(iterations):
+            self.data.qpos[:] = q
+            mujoco.mj_forward(self.model, self.data)
+            mujoco.mj_jacSite(
+                self.model, self.data, jacobian[:3], jacobian[3:], self._tcp_site_id
+            )
+            arm_jacobian = jacobian[:, self._arm_dof_adr]
+            pos_error = position - self.data.site_xpos[self._tcp_site_id]
+            current_rotation = self.data.site_xmat[self._tcp_site_id].reshape(3, 3)
+            ori_error = rotation_vector(rotation @ current_rotation.T)
+            error = np.concatenate([pos_error, ori_error])
+            velocity = np.linalg.solve(
+                arm_jacobian.T @ arm_jacobian + 3.0e-2 * np.eye(6),
+                arm_jacobian.T @ error,
+            )
+            q[self._arm_qpos_adr] += np.clip(velocity, -0.5, 0.5) * 0.5
+        self.data.qpos[:] = q
+        mujoco.mj_forward(self.model, self.data)
+        pos_error = float(
+            np.linalg.norm(position - self.data.site_xpos[self._tcp_site_id])
+        )
+        ori_error = float(
+            np.linalg.norm(rotation_vector(rotation @ self.tcp_rotation.T))
+        )
+        self.data.qpos[:] = saved_qpos
+        mujoco.mj_forward(self.model, self.data)
+        return q, pos_error, ori_error
+
+    def _arm_can_reach(
+        self,
+        position: FloatArray | None = None,
+        rotation: FloatArray | None = None,
+        tolerance: float = ARM_FIRST_ENTER_ERROR,
+    ) -> bool:
+        """Cheap arm-only DLS IK feasibility from the current arm pose.
+
+        The Z1 workspace is joint-limit-shaped (not a box in base
+        coordinates), so reachability is decided by actually trying the IK.
+        """
+        if position is None:
+            position = self._target_position
+        if rotation is None:
+            rotation = self._target_rotation
+        _, pos_error, ori_error = self._arm_ik_from(
+            self.data.qpos.copy(), position, rotation, 12
+        )
+        return bool(pos_error < tolerance and ori_error < ARM_FIRST_ENTER_ORI)
+
+    def _maybe_replan_arm(self) -> None:
+        """Unwedge the arm-only servo from a local minimum.
+
+        The incremental DLS servo can get wedged against a joint limit or in
+        a wrong homotopy class after repeated nudges (the Z1 workspace is
+        highly non-convex). The WBC servo reliably converges from the
+        canonical config (ARM_NOMINAL), so on stall the joint reference is
+        blended back there and the servo re-converges, the base stays locked.
+        """
+        if not (self.arm_first and self.arm_only_active):
+            self._arm_stall_counter = 0
+            self._replan_target = None
+            self._replan_folded = False
+            self._arm_error_window.clear()
+            return
+        if self._replan_target is not None:
+            step = np.clip(
+                self._replan_target - self._joint_reference[12:], -0.06, 0.06
+            )
+            self._joint_reference[12:] += step
+            if (
+                np.linalg.norm(self._replan_target - self._joint_reference[12:])
+                < 0.02
+            ):
+                self._replan_target = None
+            return
+        pos_error = float(
+            np.linalg.norm(self._target_position - self.tcp_position)
+        )
+        ori_error = float(
+            np.linalg.norm(
+                rotation_vector(self._target_rotation @ self.tcp_rotation.T)
+            )
+        )
+        self._arm_error_window.append(pos_error)
+        if pos_error < 0.03 and ori_error < 0.05:
+            self._arm_stall_counter = 0
+            self._replan_folded = False  # recovered: a later wedge may fold again
+            return
+        # A wedge is a *plateau*, not a mere large error: the arm is stuck
+        # only if the position error has not improved over the last 0.3 s
+        # AND the arm joints are actually idle (a slow step-response tail
+        # keeps moving, so it never looks wedged).
+        window = self._arm_error_window
+        arm_idle = float(np.max(np.abs(self.data.qvel[self._arm_dof_adr]))) < 0.04
+        plateau = bool(
+            len(window) == window.maxlen
+            and pos_error - min(window) < 0.015
+            and arm_idle
+        )
+        if not plateau:
+            self._arm_stall_counter = 0
+            return
+        self._arm_stall_counter += 1
+        if self._arm_stall_counter < 25:  # 0.25 s on the plateau before folding
+            return
+        if self._replan_folded:
+            return  # one fold per stint; let the exit hand the task to the base
+        if pos_error > ARM_FIRST_EXIT_ERROR or ori_error > 0.12:
+            return  # clearly unreachable: the state-machine exit handles it
+        self._replan_target = ARM_NOMINAL.copy()
+        self._replan_folded = True
+        self._arm_stall_counter = 0
+        self._arm_exit_counter = 0
+
     def _solve_generalized_velocity(self) -> FloatArray:
         task_jacobians: list[FloatArray] = []
         task_velocities: list[FloatArray] = []
@@ -623,7 +782,60 @@ class B2WZ1WholeBodyController:
         )
         final_yaw_error = self._wrap_angle(desired_yaw - current_yaw)
 
-        if self.auto_drive:
+        # ---- arm-first state machine (macro-micro) -----------------------
+        if self.arm_first:
+            arm_tcp_position_error = float(
+                np.linalg.norm(self._target_position - self.tcp_position)
+            )
+            arm_tcp_orientation_error = float(
+                np.linalg.norm(
+                    rotation_vector(self._target_rotation @ self.tcp_rotation.T)
+                )
+            )
+            if self.arm_only_active and self._replan_target is None:
+                # Leave arm-only when the arm demonstrably cannot serve the
+                # target: position plateau at joint limits / outside the
+                # workspace, or a stall at the target position with the
+                # orientation stuck (the Z1 has a locked joint). Suspended
+                # while the stall-recovery fold is in flight.
+                arm_failed = bool(
+                    arm_tcp_position_error > ARM_FIRST_EXIT_ERROR
+                    or (
+                        arm_tcp_position_error < ARM_FIRST_STALL_POS
+                        and arm_tcp_orientation_error > ARM_FIRST_STALL_ORI
+                    )
+                )
+                if arm_failed:
+                    self._arm_exit_counter += 1
+                else:
+                    self._arm_exit_counter = 0
+                if self._arm_exit_counter >= ARM_FIRST_EXIT_STEPS:
+                    self.arm_only_active = False
+                    self._arm_exit_counter = 0
+            else:
+                # Re-engage only once the arm IK can reach the target AND the
+                # base has settled, so the hand-off does not chatter.
+                if self._arm_can_reach():
+                    self._arm_enter_counter += 1
+                else:
+                    self._arm_enter_counter = 0
+                base_settled = (
+                    self._base_goal_distance < ARM_FIRST_BASE_SETTLE
+                    and abs(final_yaw_error) < ARM_FIRST_BASE_SETTLE_YAW
+                )
+                if (
+                    base_settled
+                    and self._arm_enter_counter >= ARM_FIRST_ENTER_STEPS
+                ):
+                    self.arm_only_active = True
+                    self._arm_enter_counter = 0
+                    self._mobile_base_active = False
+        if self.arm_only_active:
+            # Lock the base exactly where it is; only the arm serves the TCP.
+            self._desired_base_position[:] = base_position
+            self._desired_base_rotation[:] = base_rotation
+
+        if self.auto_drive and not self.arm_only_active:
             if self._mobile_base_active:
                 self._mobile_base_active = bool(
                     self._base_goal_distance > 0.090
@@ -720,6 +932,11 @@ class B2WZ1WholeBodyController:
             if self._mobile_base_active
             else np.array([6.0, 6.0, 12.0, 15.0, 15.0, 8.0])
         )
+        if self.arm_only_active:
+            # Hold the floating base (z, roll, pitch) against arm reactions.
+            base_task_weights = np.array(
+                [18.0, 18.0, 10.0, 14.0, 14.0, 20.0]
+            )
         task_weights.append(base_task_weights)
 
         tcp_rotation = self.tcp_rotation
@@ -744,11 +961,25 @@ class B2WZ1WholeBodyController:
         desired_tcp_twist[:3] *= self._speed_scale
         desired_tcp_twist[3:] *= self._rotation_speed_scale
         desired_tcp_twist -= TCP_VEL_DAMPING * tcp_velocity
-        task_jacobians.append(
-            self._site_jacobian(self._tcp_site_id)[:, self._optimized_dofs]
-        )
+        tcp_jacobian = self._site_jacobian(self._tcp_site_id)[
+            :, self._optimized_dofs
+        ].copy()
+        if self.arm_only_active:
+            # Keep the 28-column layout for the stacked solve; zero out every
+            # dof except the arm so the base cannot participate in the servo.
+            # (_optimized_dofs is not sorted, so locate the arm columns by
+            # matching true dof indices rather than by position.)
+            arm_columns = np.isin(self._optimized_dofs, self._arm_dof_adr)
+            tcp_jacobian[:, ~arm_columns] = 0.0
+        task_jacobians.append(tcp_jacobian)
         task_velocities.append(desired_tcp_twist)
-        if reversing:
+        if self.arm_only_active:
+            # Full-priority arm-only servo: the base cannot help, so the arm
+            # gets the strongest possible position+orientation weights.
+            task_weights.append(
+                np.array([25.0, 25.0, 25.0, 12.0, 12.0, 12.0], dtype=np.float64)
+            )
+        elif reversing:
             # Position-first in reverse: folding the arm backward rotates the
             # TCP far from its home orientation, so the orientation task is
             # relaxed to a weak preference and position wins.
@@ -781,6 +1012,10 @@ class B2WZ1WholeBodyController:
             )
         else:
             posture_weights = np.full(18, 0.2, dtype=np.float64)
+        if self.arm_only_active:
+            # The arm posture rows would fight the TCP task on the same six
+            # dofs; drop them (the TCP task fully determines the arm).
+            posture_weights = np.concatenate([np.full(12, 0.2), np.zeros(6)])
         task_velocities.append(posture_velocity)
         task_weights.append(posture_weights)
 
@@ -918,6 +1153,8 @@ class B2WZ1WholeBodyController:
     def _compute_torque(self) -> FloatArray:
         if self._active:
             self._update_joint_reference()
+        # Unwedge the arm from local minima before the torque is computed.
+        self._maybe_replan_arm()
 
         leg_position = self.data.qpos[self._leg_qpos_adr]
         leg_velocity = self.data.qvel[self._leg_dof_adr]
@@ -975,4 +1212,5 @@ class B2WZ1WholeBodyController:
             max_torque=float(np.max(np.abs(self._last_torque))),
             mobile_base_active=self._mobile_base_active,
             base_goal_distance=self._base_goal_distance,
+            arm_only=self.arm_only_active,
         )

@@ -55,6 +55,7 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         tracking_curriculum: float = 1.0,
         randomization: float = 1.0,
         action_penalty: float = 0.5,
+        arm_first: bool = False,
         model: mujoco.MjModel | None = None,
         data: mujoco.MjData | None = None,
     ) -> None:
@@ -68,6 +69,9 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         # self-consistent nonzero residual, which shows up as a ~25 mm
         # steady-state tracking offset.
         self.action_penalty = float(np.clip(action_penalty, 0.0, 5.0))
+        # Arm-first macro-micro servo: the policy was trained with the base
+        # participating, so default off here (keeps the trained dynamics).
+        self.arm_first = bool(arm_first)
 
         if model is None or data is None:
             model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
@@ -75,7 +79,12 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         self.model = model
         self.data = data
         self.wbc = B2WZ1WholeBodyController(
-            self.model, self.data, control_hz=100.0, base_assist=0.25, auto_drive=True
+            self.model,
+            self.data,
+            control_hz=100.0,
+            base_assist=0.25,
+            auto_drive=True,
+            arm_first=self.arm_first,
         )
         self.dt = 0.02  # policy period (WBC steps twice per env step)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)

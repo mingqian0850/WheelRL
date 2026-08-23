@@ -40,6 +40,7 @@ def _print_pose(controller: B2WZ1WholeBodyController) -> None:
         f"({controller.speed_scale:.2f}x/"
         f"{controller.rotation_speed_scale:.2f}x-rot) "
         f"auto_drive={'on' if diagnostics.mobile_base_active else 'off'} "
+        f"arm_only={'on' if diagnostics.arm_only else 'off'} "
         f"base_goal={diagnostics.base_goal_distance:.3f} m"
     )
 
@@ -291,6 +292,21 @@ def main() -> None:
         "precision ~0.3 mm / 0.01 deg)",
     )
     parser.add_argument(
+        "--arm-first",
+        dest="arm_first",
+        action="store_true",
+        default=None,
+        help="macro-micro mode: the arm alone serves the TCP and the base is "
+        "locked whenever the arm can reach; the base drives only when it "
+        "cannot. Default on for --controller wbc, off for hier.",
+    )
+    parser.add_argument(
+        "--no-arm-first",
+        dest="arm_first",
+        action="store_false",
+        help="disable arm-first (full-body servo always participates)",
+    )
+    parser.add_argument(
         "--panel-port",
         type=int,
         default=8765,
@@ -320,6 +336,7 @@ def main() -> None:
             stats_path=args.hier_stats,
             auto_drive=not args.no_auto_drive,
             residual_scale=args.hier_residual_scale,
+            arm_first=False if args.arm_first is None else args.arm_first,
         )
         # The hier env already settles 0.3 s and captures the reference.
         args.settle_seconds = 0.0
@@ -327,7 +344,8 @@ def main() -> None:
             "Hierarchical controller: RL residual targets over the 100 Hz "
             "WBC servo. Commanded pose from the panel; precision from the WBC. "
             f"Residual scale: {args.hier_residual_scale:g} "
-            "(0 = pure WBC precision)."
+            "(0 = pure WBC precision). "
+            f"Arm-first: {False if args.arm_first is None else args.arm_first}."
         )
     elif args.controller == "mpc":
         # casadi/pinocchio live in the separate 'wheelrl-mpc' environment;
@@ -369,6 +387,7 @@ def main() -> None:
             auto_drive=not args.no_auto_drive,
             reverse_mode=not args.no_reverse,
             speed_profile=args.speed_profile,
+            arm_first=True if args.arm_first is None else args.arm_first,
         )
         if args.settle_seconds is None:
             args.settle_seconds = 2.0

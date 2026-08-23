@@ -36,12 +36,15 @@ class B2WZ1HierController:
         control_hz: float = 100.0,
         auto_drive: bool = True,
         residual_scale: float = 1.0,
+        arm_first: bool = False,
         device: str = "cpu",
     ) -> None:
         self.model = model
         self.data = data
         # The env owns the command bookkeeping and the WBC servo (100 Hz).
-        self.env = B2WZ1HierEnv(model=model, data=data, randomization=0.0)
+        self.env = B2WZ1HierEnv(
+            model=model, data=data, randomization=0.0, arm_first=arm_first
+        )
         self.wbc = self.env.wbc
         self.wbc.auto_drive = auto_drive
         self.control_dt = 1.0 / control_hz

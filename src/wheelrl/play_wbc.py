@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import queue
 import time
+from pathlib import Path
 from typing import Any
 
 import mujoco
@@ -17,6 +18,7 @@ from wheelrl.wbc import (
     B2WZ1WholeBodyController,
     rotation_rpy,
 )
+from wheelrl.wbc_hier import B2WZ1HierController
 
 JOG_STEPS = {
     "precision": (0.002, np.deg2rad(0.5)),
@@ -271,11 +273,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--controller",
-        choices=("wbc", "mpc"),
+        choices=("wbc", "mpc", "hier"),
         default="wbc",
-        help="controller backend: velocity-level WBC (default) or inverse-"
-        "dynamics MPC (slower, experimental)",
+        help="controller backend: velocity-level WBC (default), inverse-"
+        "dynamics MPC (slower, experimental), or hierarchical "
+        "RL-targets-over-WBC-servo (needs --hier-model/--hier-stats)",
     )
+    parser.add_argument("--hier-model", type=Path)
+    parser.add_argument("--hier-stats", type=Path)
     parser.add_argument(
         "--panel-port",
         type=int,
@@ -294,7 +299,25 @@ def main() -> None:
 
     model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
     data = mujoco.MjData(model)
-    if args.controller == "mpc":
+    if args.controller == "hier":
+        if args.hier_model is None or args.hier_stats is None:
+            raise SystemExit(
+                "--controller hier requires --hier-model and --hier-stats"
+            )
+        controller = B2WZ1HierController(
+            model,
+            data,
+            policy_path=args.hier_model,
+            stats_path=args.hier_stats,
+            auto_drive=not args.no_auto_drive,
+        )
+        # The hier env already settles 0.3 s and captures the reference.
+        args.settle_seconds = 0.0
+        print(
+            "Hierarchical controller: RL residual targets over the 100 Hz "
+            "WBC servo. Commanded pose from the panel; precision from the WBC."
+        )
+    elif args.controller == "mpc":
         # casadi/pinocchio live in the separate 'wheelrl-mpc' environment;
         # import lazily so the default environment keeps working without them.
         try:

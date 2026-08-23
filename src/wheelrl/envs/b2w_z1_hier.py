@@ -54,14 +54,19 @@ class B2WZ1HierEnv(gym.Env[np.ndarray, np.ndarray]):
         max_episode_steps: int = 1000,
         tracking_curriculum: float = 1.0,
         randomization: float = 1.0,
+        model: mujoco.MjModel | None = None,
+        data: mujoco.MjData | None = None,
     ) -> None:
         self.render_mode = render_mode
         self.max_episode_steps = max_episode_steps
         self.tracking_curriculum = float(np.clip(tracking_curriculum, 0.0, 1.0))
         self.randomization = float(np.clip(randomization, 0.0, 1.0))
 
-        self.model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
-        self.data = mujoco.MjData(self.model)
+        if model is None or data is None:
+            model = mujoco.MjModel.from_xml_path(str(WBC_MODEL_PATH))
+            data = mujoco.MjData(model)
+        self.model = model
+        self.data = data
         self.wbc = B2WZ1WholeBodyController(
             self.model, self.data, control_hz=100.0, base_assist=0.25, auto_drive=True
         )

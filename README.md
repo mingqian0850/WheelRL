@@ -181,6 +181,15 @@ If the browser cannot be opened automatically, visit the printed URL (normally
 See [`docs/MUJOCO_VIEWER_GUIDE.md`](docs/MUJOCO_VIEWER_GUIDE.md) for every
 viewer panel, mouse action, and keyboard shortcut relevant to WheelRL.
 
+The robot model also carries a VBC-style dual RGB-D layout: `head_cam` on the
+front of B2-W and `z1_cam` beside the gripper. Their poses, projection,
+96 x 54 visual-policy interface, real-camera options, and sim-to-real noise
+model are documented in
+[`docs/VISION_CAMERA_SETUP.md`](docs/VISION_CAMERA_SETUP.md).
+The preserved VBC baseline and the separate constrained high-precision TCP
+tracking roadmap are recorded in
+[`docs/HIGH_PRECISION_TCP_TRACKING_ROADMAP.md`](docs/HIGH_PRECISION_TCP_TRACKING_ROADMAP.md).
+
 The original keyboard controls remain as an explicit legacy mode:
 
 ```bash

@@ -1,6 +1,35 @@
+import mujoco
 import numpy as np
 
 from wheelrl.envs import B2WZ1DoorEnv, B2WZ1Env
+
+
+def test_vbc_style_cameras_face_forward() -> None:
+    env = B2WZ1Env(command_curriculum=0.0)
+    try:
+        env.reset(seed=0)
+        mujoco.mj_forward(env.model, env.data)
+
+        base_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
+        wrist_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "z1_link06")
+        head_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_CAMERA, "head_cam")
+        z1_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_CAMERA, "z1_cam")
+
+        assert head_id >= 0
+        assert z1_id >= 0
+        np.testing.assert_allclose(env.model.cam_fovy[[head_id, z1_id]], 42.272558950)
+
+        base_rotation = env.data.xmat[base_id].reshape(3, 3)
+        wrist_rotation = env.data.xmat[wrist_id].reshape(3, 3)
+        head_rotation = env.data.cam_xmat[head_id].reshape(3, 3)
+        z1_rotation = env.data.cam_xmat[z1_id].reshape(3, 3)
+
+        head_view_base = base_rotation.T @ (-head_rotation[:, 2])
+        z1_view_wrist = wrist_rotation.T @ (-z1_rotation[:, 2])
+        np.testing.assert_allclose(head_view_base, [1.0, 0.0, 0.0], atol=1e-9)
+        np.testing.assert_allclose(z1_view_wrist, [1.0, 0.0, 0.0], atol=1e-9)
+    finally:
+        env.close()
 
 
 def test_model_and_environment_step() -> None:

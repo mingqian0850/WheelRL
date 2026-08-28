@@ -112,6 +112,20 @@
         quat="0.707107 -0.707107 -1.29867e-06 -1.29867e-06" type="mesh" contype="0" conaffinity="0"
         group="1" density="0" rgba="0 0 0 1" mesh="r_oc_link" />
       <site name="imu" pos="0 -0.02341 0.04927" />
+      <!-- VBC-style forward RGB-D camera.  The optical center follows the
+           public Visual Whole-Body Control configuration
+           (base-relative position 0.425, 0.04, 0.12 m).  MuJoCo cameras look
+           along local -z, so this quaternion makes -z point along the B2-W
+           +x/forward axis and local +y point along +z/up.  At a 96:54 render
+           size, fovy=42.272559 gives the public configuration's 69 degree
+           horizontal field of view. -->
+      <body name="head_camera" pos="0.425 0.04 0.12">
+        <geom type="box" size="0.012 0.045 0.012" pos="-0.014 0 0"
+          rgba="0.25 0.25 0.28 1" group="1"/>
+        <geom type="cylinder" size="0.006 0.008" pos="0 0 0"
+          euler="0 1.570796327 0" rgba="0.1 0.1 0.15 1" group="1"/>
+        <camera name="head_cam" quat="0.5 0.5 -0.5 -0.5" fovy="42.272558950"/>
+      </body>
       <!--
         Z1 mount: the base-plate front edge (mesh z1_link00 extends to
         x=+0.039 in the body frame) aligns with the front of the dog's main
@@ -177,18 +191,20 @@
                          rolls with axis 6. The side mount keeps the gripper
                          fingers (which open in the x-z plane) and the forearm
                          out of the image center. At the Z1 initial pose the
-                         optical axis (camera z) points forward, the same
+                         optical axis (camera -z) points forward, the same
                          direction as the dog's own head camera/lidar, and the
                          image is upright (camera y = z1_link06 +z, world up
-                         at the initial pose). quat (0.5 0.5 0.5 0.5) maps
-                         local x->y, y->z, z->x of z1_link06. Camera "z1_cam". -->
+                         at the initial pose). quat (0.5 0.5 -0.5 -0.5) maps
+                         local x->-y, y->z, and -z->x of z1_link06. At a 96:54
+                         render size, fovy=42.272559 gives the VBC code's
+                         69-degree horizontal field of view. Camera "z1_cam". -->
                     <body name="z1_camera" pos="0.02 0.09 0">
-                      <geom type="box" size="0.045 0.012 0.012" pos="0 0 0"
+                      <geom type="box" size="0.012 0.045 0.012" pos="0 0 0"
                         rgba="0.25 0.25 0.28 1" group="1"/>
                       <geom type="cylinder" size="0.006 0.008" pos="0.045 0 0"
                         euler="0 1.570796327 0" rgba="0.1 0.1 0.15 1" group="1"/>
                       <camera name="z1_cam" pos="0.045 0 0"
-                        quat="0.5 0.5 0.5 0.5" fovy="58"/>
+                        quat="0.5 0.5 -0.5 -0.5" fovy="42.272558950"/>
                     </body>
                     <body name="z1_gripper_stator" pos="0.051 0 0">
                       <inertial pos="0.04764427 -0.00035819 -0.00249162" mass="0.52603655"

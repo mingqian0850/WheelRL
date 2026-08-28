@@ -3,6 +3,13 @@
 This project provides a runnable WSL2 training starter for whole-body control of
 a Unitree B2-W carrying a six-axis Unitree Z1 arm and its one-DoF gripper.
 
+The current research status, literature audit, open-source baseline ranking, and
+recommended B2+Z1-first roadmap are recorded in
+[`docs/research/RESEARCH_STATUS_2026-08-28.md`](docs/research/RESEARCH_STATUS_2026-08-28.md).
+The roadmap treats this repository as a measurable baseline, not as a required
+architecture: a clean-slate model, controller, simulator, or training stack is
+explicitly allowed when it produces a stronger reproducible result.
+
 The environment has:
 
 - the official Unitree B2-W MuJoCo body and wheel assets;

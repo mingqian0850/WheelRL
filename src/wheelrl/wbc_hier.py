@@ -1,10 +1,10 @@
-"""Hierarchical whole-body controller: RL target generation over WBC servo.
+"""Hierarchical whole-body controller: learned base coordination over WBC.
 
 ``B2WZ1HierController`` presents the same interface as
 :class:`wheelrl.wbc.B2WZ1WholeBodyController` so the play-wbc panel can drive
-it. The commanded TCP pose (from the panel) is the reference; every 50 Hz
-step a small residual policy (6-dim position/RPY offsets) corrects it, and
-the wrapped 100 Hz WBC serves the result with its analytic DLS IK.
+it. The commanded TCP pose (from the panel) remains the exact WBC reference;
+every 50 Hz step a three-dimensional policy corrects base forward velocity,
+yaw rate and height only when the analytic reachability gate permits it.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ FloatArray = np.ndarray
 
 
 class B2WZ1HierController:
-    """Panel-compatible controller: RL residuals over the WBC servo."""
+    """Panel-compatible controller: RL base coordination over WBC."""
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class B2WZ1HierController:
         control_hz: float = 100.0,
         auto_drive: bool = True,
         residual_scale: float = 1.0,
-        arm_first: bool = False,
+        arm_first: bool = True,
         device: str = "cpu",
     ) -> None:
         self.model = model
@@ -58,20 +58,23 @@ class B2WZ1HierController:
         stats_venv.norm_reward = False
         self._stats = stats_venv
         self.policy = PPO.load(policy_path, device=device)
+        if self.policy.action_space.shape != (3,):
+            raise ValueError(
+                "This controller requires a new 3-action coordinator policy; "
+                "the legacy 6-action TCP-residual checkpoints are incompatible."
+            )
 
         self._speed_profile = "normal"
         self._speed_scale = 1.0
         self._rotation_speed_scale = 1.0
         self._active = False
-        self._last_action = np.zeros(6, dtype=np.float64)
-        # Low-passed residual: the raw policy output jumps ~20 mm per 50 Hz
-        # step (sensitive to obs noise), which makes the commanded target and
-        # its marker visibly shake. Smoothing keeps the servo target calm
-        # without changing the steady-state behavior.
-        self._residual_smoothed = np.zeros(6, dtype=np.float64)
-        self._residual_smoothing = 0.30
-        # 0 = servo the user command directly (WBC-level precision, ~1-3 mm);
-        # 1 = full RL residual correction (trained behavior, ~25 mm offset).
+        self._last_action = np.zeros(3, dtype=np.float64)
+        # Smooth macro velocity commands while leaving the TCP reference
+        # untouched. The analytic gate in the environment is independent.
+        self._coordinator_smoothed = np.zeros(3, dtype=np.float64)
+        self._coordinator_smoothing = 0.30
+        # Kept under the old CLI name for compatibility: zero means pure WBC,
+        # one means the policy's full normalized base command.
         self.residual_scale = float(residual_scale)
 
     # ------------------------------------------------------------ pose state
@@ -131,36 +134,37 @@ class B2WZ1HierController:
     def capture_reference(self) -> None:
         self.wbc.capture_reference()
         # The command starts at the settled TCP pose.
-        self.env._command_pos_world[:] = self.wbc.home_tcp_position
-        self.env._command_rotation_world[:] = self.wbc.home_tcp_rotation
-        self.env._command_rpy.fill(0.0)
+        self.env.set_command_pose(
+            self.wbc.home_tcp_position,
+            self.wbc.home_tcp_rotation,
+        )
         self._active = True
 
     def set_target_pose(self, position: FloatArray, rotation: FloatArray) -> None:
-        self.env._command_pos_world[:] = np.asarray(position, dtype=float)
-        self.env._command_rotation_world[:] = np.asarray(rotation, dtype=float)
-        self.env._command_rpy.fill(0.0)
+        self.env.set_command_pose(position, rotation)
 
     def set_home_offset(
         self,
         position_offset: FloatArray,
         rpy_offset_radians: FloatArray,
     ) -> None:
-        self.env._command_pos_world[:] = (
-            self.wbc.home_tcp_position + np.asarray(position_offset, dtype=float)
-        )
-        self.env._command_rotation_world[:] = (
+        self.env.set_command_pose(
+            self.wbc.home_tcp_position + np.asarray(position_offset, dtype=float),
             self.wbc.home_tcp_rotation
-            @ rpy_rotation(np.asarray(rpy_offset_radians, dtype=float))
+            @ rpy_rotation(np.asarray(rpy_offset_radians, dtype=float)),
         )
-        self.env._command_rpy.fill(0.0)
 
     def go_home(self) -> None:
-        self.env._command_pos_world[:] = self.wbc.home_tcp_position
-        self.env._command_rotation_world[:] = self.wbc.home_tcp_rotation
+        self.env.set_command_pose(
+            self.wbc.home_tcp_position,
+            self.wbc.home_tcp_rotation,
+        )
 
     def nudge_position(self, world_delta: FloatArray) -> None:
-        self.env._command_pos_world += np.asarray(world_delta, dtype=float)
+        self.env.set_command_pose(
+            self.env._command_pos_world + np.asarray(world_delta, dtype=float),
+            self.env._command_rotation_world,
+        )
 
     def nudge_position_base(self, local_delta: FloatArray) -> None:
         delta = np.asarray(local_delta, dtype=float)
@@ -185,7 +189,10 @@ class B2WZ1HierController:
         rotation = (
             np.eye(3) + np.sin(angle) * cross + (1.0 - np.cos(angle)) * (cross @ cross)
         )
-        self.env._command_rotation_world[:] = rotation @ self.env._command_rotation_world
+        self.env.set_command_pose(
+            self.env._command_pos_world,
+            rotation @ self.env._command_rotation_world,
+        )
 
     def set_gripper(self, *, closed: bool) -> None:
         self.wbc.set_gripper(closed=closed)
@@ -201,27 +208,30 @@ class B2WZ1HierController:
         self._speed_profile = profile
         self._speed_scale = SPEED_PROFILE_SCALES[profile]
         self._rotation_speed_scale = ROTATION_SPEED_PROFILE_SCALES[profile]
+        self.wbc.set_speed_profile(profile)
 
     # --------------------------------------------------------------- control
     def step(self) -> WBCDiagnostics:
-        """One 50 Hz policy step = one residual correction + two WBC steps."""
+        """One 50 Hz policy step = one macro command + two WBC steps."""
         observation = self.env._get_obs()
         normalized = self._stats.normalize_obs(np.asarray(observation)[None])[0]
         action, _ = self.policy.predict(normalized, deterministic=True)
         self._last_action[:] = np.asarray(action, dtype=float)
-        self._residual_smoothed += self._residual_smoothing * (
-            self._last_action - self._residual_smoothed
+        self._coordinator_smoothed += self._coordinator_smoothing * (
+            self._last_action - self._coordinator_smoothed
         )
         # The marker override is set BEFORE the servo step, so the triad
-        # never contains the (residual) servo target at any render point.
+        # always remains exactly at the user supplied TCP reference.
         self.wbc._marker_pose = (
             self.env._command_pos_world.copy(),
             self.env._command_rotation_world.copy(),
         )
-        self.env.step(self.residual_scale * self._residual_smoothed)
+        self.env.set_coordinator_enabled(abs(self.residual_scale) > 1.0e-6)
+        self.env.step(self.residual_scale * self._coordinator_smoothed)
         return self.diagnostics()
 
     def diagnostics(self) -> WBCDiagnostics:
+        wbc_diagnostics = self.wbc.diagnostics()
         position_error = float(
             np.linalg.norm(
                 self.env._command_pos_world - self.data.site_xpos[self.wbc._tcp_site_id]
@@ -244,6 +254,14 @@ class B2WZ1HierController:
             max_torque=float(np.max(np.abs(self.wbc._last_torque))),
             mobile_base_active=self.wbc._mobile_base_active,
             base_goal_distance=self.wbc._base_goal_distance,
+            arm_only=self.wbc.arm_only_active,
+            coordinator_gate=self.env._coordination_gate,
+            solver_residual=self.wbc._solver_residual,
+            base_participation=self.wbc._base_participation,
+            tcp_speed=self.wbc._tcp_speed,
+            vertical_limited=wbc_diagnostics.vertical_limited,
+            tilt_assist_active=wbc_diagnostics.tilt_assist_active,
+            tilt_angle=wbc_diagnostics.tilt_angle,
         )
 
     def close(self) -> None:

@@ -33,10 +33,19 @@ case "$task" in
       --device "$policy_device" \
       --randomization "${RANDOMIZATION:-0.55}"
     ;;
+  coordinator)
+    exec .venv/bin/wheelrl-train-hier \
+      --stage "${COORDINATOR_STAGE:-curriculum}" \
+      --timesteps "$timesteps" \
+      --n-envs "$n_envs" \
+      --seed "$seed" \
+      --device "$policy_device" \
+      --randomization "${RANDOMIZATION:-0.75}"
+    ;;
   *)
-    echo "usage: $0 {gripper|door}" >&2
+    echo "usage: $0 {gripper|door|coordinator}" >&2
     echo "optional: N_ENVS, SEED, TIMESTEPS, POLICY_DEVICE," >&2
-    echo "          COMMAND_SCALE, RANDOMIZATION" >&2
+    echo "          COMMAND_SCALE, RANDOMIZATION, COORDINATOR_STAGE" >&2
     exit 2
     ;;
 esac

@@ -197,7 +197,15 @@ async function poll() {
       latest.position_error.toFixed(4) + ' m · ' +
       latest.orientation_error_deg.toFixed(2) + '°';
     document.getElementById('mode').textContent =
-      (latest.mobile_base_active ? 'base moving' : 'arm workspace') + ' · ' +
+      (latest.vertical_limited ?
+        'vertical target limited · tilt ' + latest.tilt_angle_deg.toFixed(1) + '°' :
+        (latest.tilt_assist_active ?
+          (latest.mobile_base_active ? 'tilted drive ' : 'low-reach tilt ') +
+            latest.tilt_angle_deg.toFixed(1) + '°' :
+        (latest.mobile_base_active ?
+          'base moving ' + (100 * latest.base_participation).toFixed(0) + '%' :
+          'arm precision'))) + ' · ' +
+      latest.tcp_speed_mm_s.toFixed(1) + ' mm/s · ' +
       (latest.gripper_closed ? 'closed' : 'open') + ' · ' +
       latest.speed_profile;
     document.getElementById('auto').checked = latest.auto_drive;
@@ -224,6 +232,12 @@ class WBCControlPanel:
             "position_error": 0.0,
             "orientation_error_deg": 0.0,
             "mobile_base_active": False,
+            "arm_only": True,
+            "base_participation": 0.0,
+            "tcp_speed_mm_s": 0.0,
+            "vertical_limited": False,
+            "tilt_assist_active": False,
+            "tilt_angle_deg": 0.0,
             "gripper_closed": False,
             "auto_drive": True,
             "speed_profile": "normal",

@@ -61,6 +61,40 @@ TCP_POS_GAIN = 3.0
 TCP_ORI_GAIN = 3.0
 TCP_VEL_DAMPING = 0.60
 BASE_VEL_DAMPING = 0.80
+# The command is considered to be in the terminal region below these errors.
+# We still command velocity damping there; only the proportional term enters a
+# dead band.  This removes the tiny limit cycle that otherwise remains after
+# the TCP reaches a target.
+TCP_POSITION_DEADBAND = 1.0e-3
+TCP_ORIENTATION_DEADBAND = np.deg2rad(0.15)
+TCP_TERMINAL_POSITION = 0.06
+TCP_TERMINAL_ORIENTATION = np.deg2rad(8.0)
+TCP_TERMINAL_DAMPING = 1.05
+
+# Comfortable TCP displacement from the captured arm pose, expressed in the
+# current base frame.  Outside this region the base participates continuously
+# instead of waiting for the arm servo to sit at a joint limit for 0.5 s.
+ARM_COMFORT_DELTA_LOW = np.array([-0.12, -0.10, -0.14], dtype=np.float64)
+ARM_COMFORT_DELTA_HIGH = np.array([0.16, 0.10, 0.14], dtype=np.float64)
+BASE_PARTICIPATION_START = 0.82
+BASE_PARTICIPATION_FULL = 1.12
+# Vertical TCP tracking belongs to Z1.  B2-W may trim ride height slightly,
+# but it must never keep crouching to chase a target below the arm workspace.
+BASE_HEIGHT_ASSIST_LOW = -0.015
+BASE_HEIGHT_ASSIST_HIGH = 0.030
+# Low-reach posture: pitch the front of the body down while keeping all four
+# wheels planted. The arm target is lowered only as this posture becomes
+# available, preventing Z1 from folding through the top deck during entry.
+LOW_TILT_START_DROP = 0.30
+LOW_TILT_FULL_DROP = 0.48
+LOW_TILT_MAX = np.deg2rad(14.0)
+LOW_TILT_RATE = np.deg2rad(18.0)  # rad/s, smooth ~0.8 s full transition
+LOW_TILT_FRONT_X = 0.20
+LOW_TILT_SAFE_DROP_LEVEL = 0.38
+LOW_TILT_SAFE_DROP_FULL = 0.48
+LOW_TILT_DRIVE_SCALE = 0.45
+LOW_TILT_HOLD_ENTER_ERROR = 0.030
+LOW_TILT_HOLD_EXIT_ERROR = 0.070
 # Arm servo gains are boosted locally (the RL envs keep their own tuning).
 ARM_KP_SCALE = 1.5
 ARM_KD_SCALE = 2.0
@@ -83,6 +117,7 @@ REVERSE_REACHABLE_DELTA_HIGH = np.array([-0.05, 0.10, 0.14], dtype=np.float64)
 # joint limits and workspace shape are handled automatically (the Z1 workspace
 # is highly asymmetric and not a box in base coordinates).
 ARM_FIRST_EXIT_ERROR = 0.08  # m: arm-only TCP error that means "unreachable"
+ARM_FIRST_IMMEDIATE_EXIT_ERROR = 0.06  # m: clear new planar target command
 ARM_FIRST_EXIT_STEPS = 50  # 0.5 s at 100 Hz before handing off to the base
 ARM_FIRST_ENTER_ERROR = 0.015  # m: arm-only IK achievable error to re-engage
 ARM_FIRST_ENTER_ORI = 0.02  # rad: arm-only IK achievable orientation error
@@ -96,6 +131,103 @@ ARM_FIRST_BASE_SETTLE_YAW = 0.02  # rad: max yaw error at re-engage
 # yaw can help satisfy the orientation.
 ARM_FIRST_STALL_POS = 0.05  # m: arm is at the target position...
 ARM_FIRST_STALL_ORI = 0.12  # rad: ...but the orientation is stuck
+
+
+def smoothstep(edge0: float, edge1: float, value: float) -> float:
+    """Return a C1-continuous transition from zero to one."""
+    if edge1 <= edge0:
+        raise ValueError("edge1 must be greater than edge0")
+    scaled = float(np.clip((value - edge0) / (edge1 - edge0), 0.0, 1.0))
+    return scaled * scaled * (3.0 - 2.0 * scaled)
+
+
+def clip_vector_norm(vector: FloatArray, maximum: float) -> FloatArray:
+    """Limit a vector magnitude without changing its direction."""
+    result = np.asarray(vector, dtype=np.float64).copy()
+    norm = float(np.linalg.norm(result))
+    if norm > maximum > 0.0:
+        result *= maximum / norm
+    return result
+
+
+def solve_box_least_squares(
+    matrix: FloatArray,
+    target: FloatArray,
+    lower: FloatArray,
+    upper: FloatArray,
+    *,
+    damping: float = 0.0,
+    max_iterations: int | None = None,
+) -> FloatArray:
+    """Solve a small damped least-squares problem with box constraints.
+
+    This is a bounded-variable active-set solver for
+
+    ``min 0.5 ||A x - b||^2 + 0.5 * damping * ||x||^2``.
+
+    The WBC has only 28 variables, so solving the free normal equations and
+    updating the active set is both faster and more predictable than adding a
+    heavyweight optimization dependency.  Unlike solving and clipping, the
+    returned free variables are re-optimized after a joint reaches a bound.
+    """
+    a = np.asarray(matrix, dtype=np.float64)
+    b = np.asarray(target, dtype=np.float64)
+    lo = np.asarray(lower, dtype=np.float64)
+    hi = np.asarray(upper, dtype=np.float64)
+    if a.ndim != 2 or b.shape != (a.shape[0],):
+        raise ValueError("matrix and target shapes are incompatible")
+    if lo.shape != (a.shape[1],) or hi.shape != (a.shape[1],):
+        raise ValueError("bounds must match the number of variables")
+    if np.any(lo > hi):
+        raise ValueError("lower bounds must not exceed upper bounds")
+    if damping < 0.0:
+        raise ValueError("damping must be non-negative")
+
+    variable_count = a.shape[1]
+    iterations = max_iterations or max(4 * variable_count, 1)
+    active = np.zeros(variable_count, dtype=np.int8)  # -1 lower, +1 upper
+    solution = np.clip(np.zeros(variable_count, dtype=np.float64), lo, hi)
+    tolerance = 1.0e-9
+
+    for _ in range(iterations):
+        free = active == 0
+        fixed = ~free
+        solution[active < 0] = lo[active < 0]
+        solution[active > 0] = hi[active > 0]
+
+        if np.any(free):
+            residual_target = b.copy()
+            if np.any(fixed):
+                residual_target -= a[:, fixed] @ solution[fixed]
+            free_matrix = a[:, free]
+            normal = free_matrix.T @ free_matrix
+            if damping:
+                normal += damping * np.eye(normal.shape[0])
+            right_hand_side = free_matrix.T @ residual_target
+            try:
+                candidate = np.linalg.solve(normal, right_hand_side)
+            except np.linalg.LinAlgError:
+                candidate = np.linalg.lstsq(normal, right_hand_side, rcond=None)[0]
+
+            free_indices = np.flatnonzero(free)
+            below = candidate < lo[free] - tolerance
+            above = candidate > hi[free] + tolerance
+            solution[free] = np.clip(candidate, lo[free], hi[free])
+            if np.any(below) or np.any(above):
+                active[free_indices[below]] = -1
+                active[free_indices[above]] = 1
+                continue
+
+        gradient = a.T @ (a @ solution - b) + damping * solution
+        lower_release = np.flatnonzero((active < 0) & (gradient < -tolerance))
+        upper_release = np.flatnonzero((active > 0) & (gradient > tolerance))
+        if lower_release.size == 0 and upper_release.size == 0:
+            break
+        candidates = np.concatenate([lower_release, upper_release])
+        release = int(candidates[np.argmax(np.abs(gradient[candidates]))])
+        active[release] = 0
+
+    return np.clip(solution, lo, hi)
 
 
 def rotation_vector(rotation: FloatArray) -> FloatArray:
@@ -170,6 +302,13 @@ class WBCDiagnostics:
     mobile_base_active: bool
     base_goal_distance: float
     arm_only: bool = False
+    coordinator_gate: float = 0.0
+    solver_residual: float = 0.0
+    base_participation: float = 0.0
+    tcp_speed: float = 0.0
+    vertical_limited: bool = False
+    tilt_assist_active: bool = False
+    tilt_angle: float = 0.0
 
 
 class B2WZ1WholeBodyController:
@@ -286,6 +425,24 @@ class B2WZ1WholeBodyController:
         self._last_torque = np.zeros(23, dtype=np.float64)
         self._wheel_velocity_target = np.zeros(4, dtype=np.float64)
         self._mobile_base_active = False
+        # Optional learned macro correction. It acts only on the floating-base
+        # task; the user supplied TCP target is never modified.  The command
+        # is [forward velocity (m/s), yaw rate (rad/s), base-height offset
+        # (m)].  A smooth analytic reachability gate decides whether it may
+        # participate at all.
+        self._coordinator_command: FloatArray | None = None
+        self._coordinator_gate = 0.0
+        self._actuator_gain_scale = 1.0
+        self._solver_residual = 0.0
+        self._base_participation = 0.0
+        self._tcp_speed = 0.0
+        self._tilt_angle = 0.0
+        self._tilt_fraction = 0.0
+        self._tilt_recovering = False
+        self._tilt_planar_hold = False
+        self._tilt_hold_base_position = np.zeros(3, dtype=np.float64)
+        self._tilt_hold_heading_rotation = np.eye(3, dtype=np.float64)
+        self._vertical_target_clamped = False
 
     def _id(self, object_type: mujoco.mjtObj, name: str) -> int:
         object_id = mujoco.mj_name2id(self.model, object_type, name)
@@ -367,7 +524,25 @@ class B2WZ1WholeBodyController:
         self._gripper_target = float(GRIPPER_NOMINAL[0])
         self._active = False
         self._mobile_base_active = False
+        self.arm_only_active = False
+        self._arm_exit_counter = 0
+        self._arm_enter_counter = 0
+        self._arm_stall_counter = 0
+        self._replan_target = None
+        self._replan_folded = False
+        self._arm_error_window.clear()
         self._wheel_velocity_target.fill(0.0)
+        self.clear_base_coordinator_command()
+        self._solver_residual = 0.0
+        self._base_participation = 0.0
+        self._tcp_speed = 0.0
+        self._tilt_angle = 0.0
+        self._tilt_fraction = 0.0
+        self._tilt_recovering = False
+        self._tilt_planar_hold = False
+        self._tilt_hold_base_position.fill(0.0)
+        self._tilt_hold_heading_rotation[:] = np.eye(3)
+        self._vertical_target_clamped = False
         self._target_position[:] = self.tcp_position
         self._target_rotation[:] = self.tcp_rotation
         self._update_target_marker()
@@ -387,6 +562,16 @@ class B2WZ1WholeBodyController:
         )
         self._target_position[:] = self._home_tcp_position
         self._target_rotation[:] = self._home_tcp_rotation
+        # The captured pose is trivially arm-reachable.  Start macro/micro
+        # control in its stable precision state; a later planar-unreachable
+        # command releases the base immediately through the participation
+        # gate.  Without this initialization, a low first command spends its
+        # first updates in full-body mode and can translate the base before
+        # arm reachability has even been evaluated.
+        self.arm_only_active = self.arm_first
+        self._mobile_base_active = False
+        self._arm_exit_counter = 0
+        self._arm_enter_counter = 0
         self._active = True
         self._update_target_marker()
 
@@ -462,11 +647,44 @@ class B2WZ1WholeBodyController:
         self._speed_scale = SPEED_PROFILE_SCALES[profile]
         self._rotation_speed_scale = ROTATION_SPEED_PROFILE_SCALES[profile]
 
+    def set_base_coordinator_command(
+        self,
+        command: FloatArray,
+        *,
+        gate: float,
+    ) -> None:
+        """Set a learned base command without changing the TCP pose target.
+
+        ``gate`` is supplied by an analytic reachability check. A zero gate
+        disables the learned command completely and restores normal arm-first
+        WBC behavior, which prevents a policy from degrading easy local
+        manipulation targets.
+        """
+        command_array = np.asarray(command, dtype=np.float64)
+        if command_array.shape != (3,) or not np.isfinite(command_array).all():
+            raise ValueError("coordinator command must be a finite (3,) array")
+        self._coordinator_command = np.clip(
+            command_array,
+            np.array([-0.45, -0.80, -0.08], dtype=np.float64),
+            np.array([0.45, 0.80, 0.08], dtype=np.float64),
+        )
+        self._coordinator_gate = float(np.clip(gate, 0.0, 1.0))
+
+    def clear_base_coordinator_command(self) -> None:
+        """Return base planning entirely to the analytic WBC."""
+        self._coordinator_command = None
+        self._coordinator_gate = 0.0
+
+    def set_actuator_gain_scale(self, scale: float) -> None:
+        """Scale joint servo gains for dynamics randomization experiments."""
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError("actuator gain scale must be finite and positive")
+        self._actuator_gain_scale = float(np.clip(scale, 0.70, 1.30))
+
     def _update_target_marker(self) -> None:
         if self._target_mocap_id < 0:
             return
-        # _marker_pose overrides the displayed pose (used by the hierarchical
-        # controller so the triad never shows the RL residual target).
+        # _marker_pose overrides the displayed pose for compatible wrappers.
         if self._marker_pose is not None:
             position, rotation = self._marker_pose
         else:
@@ -559,6 +777,261 @@ class B2WZ1WholeBodyController:
         )
         return bool(pos_error < tolerance and ori_error < ARM_FIRST_ENTER_ORI)
 
+    def _base_participation_score(
+        self,
+        base_position: FloatArray,
+        base_rotation: FloatArray,
+    ) -> float:
+        """Return a smooth measure of how much the base should help the arm.
+
+        The primary signal is the target's utilization of the comfortable arm
+        workspace.  Joint-limit and manipulability risks add smaller signals
+        only while a meaningful TCP error remains.  Consequently the base is
+        quiet for precise local tracking but joins immediately for an
+        unreachable or awkward target.
+        """
+        target_in_base = base_rotation.T @ (self._target_position - base_position)
+        delta = target_in_base - self._home_tcp_position_base
+        center = 0.5 * (ARM_COMFORT_DELTA_LOW + ARM_COMFORT_DELTA_HIGH)
+        half_width = 0.5 * (ARM_COMFORT_DELTA_HIGH - ARM_COMFORT_DELTA_LOW)
+        # Driving can improve x/y reach, but cannot solve a pure z error.  Do
+        # not interpret a low TCP target as a request to move or crouch B2-W.
+        planar_utilization = float(
+            np.max(np.abs((delta[:2] - center[:2]) / half_width[:2]))
+        )
+        workspace_need = smoothstep(
+            BASE_PARTICIPATION_START,
+            BASE_PARTICIPATION_FULL,
+            planar_utilization,
+        )
+        planar_opportunity = smoothstep(
+            0.04,
+            0.14,
+            float(np.linalg.norm(delta[:2])),
+        )
+
+        arm_position = self.data.qpos[self._arm_qpos_adr]
+        arm_width = np.maximum(
+            self._arm_joint_ranges[:, 1] - self._arm_joint_ranges[:, 0],
+            1.0e-6,
+        )
+        normalized_margin = np.minimum(
+            arm_position - self._arm_joint_ranges[:, 0],
+            self._arm_joint_ranges[:, 1] - arm_position,
+        ) / arm_width
+        joint_need = 1.0 - smoothstep(
+            0.04,
+            0.18,
+            float(np.min(normalized_margin)),
+        )
+
+        arm_jacobian = self._site_jacobian(self._tcp_site_id)[
+            :3, self._arm_dof_adr
+        ]
+        smallest_singular = float(
+            np.min(np.linalg.svd(arm_jacobian, compute_uv=False))
+        )
+        singular_need = 1.0 - smoothstep(0.04, 0.12, smallest_singular)
+        error_need = smoothstep(
+            0.015,
+            0.08,
+            float(np.linalg.norm(self._target_position - self.tcp_position)),
+        )
+        return float(
+            np.clip(
+                max(
+                    workspace_need,
+                    0.65 * planar_opportunity * error_need * joint_need,
+                    0.45 * planar_opportunity * error_need * singular_need,
+                ),
+                0.0,
+                1.0,
+            )
+        )
+
+    def _generalized_velocity_bounds(self) -> tuple[FloatArray, FloatArray]:
+        """Build speed and one-step joint-position bounds for the WBC QP."""
+        lower = np.array(
+            [-0.40] * 3
+            + [-1.0] * 3
+            + [-0.35] * 12
+            + [-8.0] * 4
+            + [-1.0] * 6,
+            dtype=np.float64,
+        )
+        upper = -lower
+        lower[:3] *= self._speed_scale
+        upper[:3] *= self._speed_scale
+        lower[3:6] *= self._rotation_speed_scale
+        upper[3:6] *= self._rotation_speed_scale
+        lower[6:] *= self._speed_scale
+        upper[6:] *= self._speed_scale
+
+        leg_lower = WBC_STAND_LEG_NOMINAL - 0.22
+        leg_upper = WBC_STAND_LEG_NOMINAL + 0.22
+        lower[6:18] = np.maximum(
+            lower[6:18],
+            (leg_lower - self._joint_reference[:12]) / self.control_dt,
+        )
+        upper[6:18] = np.minimum(
+            upper[6:18],
+            (leg_upper - self._joint_reference[:12]) / self.control_dt,
+        )
+
+        joint_margin = 1.0e-3
+        arm_lower = self._arm_joint_ranges[:, 0] + joint_margin
+        arm_upper = self._arm_joint_ranges[:, 1] - joint_margin
+        lower[22:] = np.maximum(
+            lower[22:],
+            (arm_lower - self._joint_reference[12:]) / self.control_dt,
+        )
+        upper[22:] = np.minimum(
+            upper[22:],
+            (arm_upper - self._joint_reference[12:]) / self.control_dt,
+        )
+        return lower, upper
+
+    def _desired_tcp_twist(
+        self,
+        control_position: FloatArray,
+        control_rotation: FloatArray,
+    ) -> FloatArray:
+        """Generate a position-priority, terminally damped SE(3) command."""
+        position_error = control_position - self.tcp_position
+        position_error_norm = float(np.linalg.norm(position_error))
+        if position_error_norm < TCP_POSITION_DEADBAND:
+            position_error = np.zeros(3, dtype=np.float64)
+
+        orientation_error = rotation_vector(
+            control_rotation @ self.tcp_rotation.T
+        )
+        orientation_error_norm = float(np.linalg.norm(orientation_error))
+        if orientation_error_norm < TCP_ORIENTATION_DEADBAND:
+            orientation_error = np.zeros(3, dtype=np.float64)
+
+        # Position dominates while the TCP is far away.  Full orientation
+        # authority returns smoothly in the terminal region.
+        orientation_priority = 1.0 - 0.75 * smoothstep(
+            0.05,
+            0.25,
+            position_error_norm,
+        )
+        linear = clip_vector_norm(TCP_POS_GAIN * position_error, 0.30)
+        angular = orientation_priority * clip_vector_norm(
+            TCP_ORI_GAIN * orientation_error,
+            0.60,
+        )
+        linear *= self._speed_scale
+        angular *= self._rotation_speed_scale
+
+        tcp_velocity = self._site_jacobian(self._tcp_site_id) @ self.data.qvel
+        self._tcp_speed = float(np.linalg.norm(tcp_velocity[:3]))
+        near_position = 1.0 - smoothstep(
+            0.01,
+            TCP_TERMINAL_POSITION,
+            position_error_norm,
+        )
+        near_orientation = 1.0 - smoothstep(
+            np.deg2rad(1.0),
+            TCP_TERMINAL_ORIENTATION,
+            orientation_error_norm,
+        )
+        linear_damping = TCP_VEL_DAMPING + near_position * (
+            TCP_TERMINAL_DAMPING - TCP_VEL_DAMPING
+        )
+        angular_damping = TCP_VEL_DAMPING + near_orientation * (
+            TCP_TERMINAL_DAMPING - TCP_VEL_DAMPING
+        )
+        linear -= linear_damping * tcp_velocity[:3]
+        angular -= angular_damping * tcp_velocity[3:]
+        return np.concatenate(
+            [
+                clip_vector_norm(linear, 0.45 * self._speed_scale),
+                clip_vector_norm(angular, 0.90 * self._rotation_speed_scale),
+            ]
+        )
+
+    def _update_low_tilt_assist(
+        self,
+        target_delta_home: FloatArray,
+        base_position: FloatArray,
+        base_rotation: FloatArray,
+    ) -> None:
+        """Smoothly request a nose-down posture for a low target in front.
+
+        Tilting is deliberately separate from ``mobile_base_active``: wheels
+        remain at their planar location while front/rear leg extension creates
+        pitch. Far planar targets are served first, then the tilt fades in as
+        the target enters the local arm workspace.
+        """
+        target_in_base = base_rotation.T @ (self._target_position - base_position)
+        target_drop = max(0.0, -float(target_delta_home[2]))
+        depth_fraction = smoothstep(
+            LOW_TILT_START_DROP,
+            LOW_TILT_FULL_DROP,
+            target_drop,
+        )
+        front_fraction = smoothstep(
+            LOW_TILT_FRONT_X - 0.08,
+            LOW_TILT_FRONT_X + 0.08,
+            float(target_in_base[0]),
+        )
+        lateral_offset = abs(
+            float(target_in_base[1] - self._home_tcp_position_base[1])
+        )
+        lateral_fraction = 1.0 - smoothstep(0.18, 0.35, lateral_offset)
+        # Enter tilt only after an initially far target has been brought near.
+        # Once the low posture exists, latch it while the target remains low
+        # and in front so forward jogging does not make the body stand up and
+        # lift the TCP during every base relocation.
+        if (
+            self._tilt_recovering
+            and depth_fraction > 0.0
+            and front_fraction > 0.5
+            and lateral_fraction > 0.5
+        ):
+            local_fraction = 1.0
+        else:
+            local_fraction = 1.0 - smoothstep(
+                0.20,
+                0.80,
+                self._base_participation,
+            )
+        requested_angle = (
+            LOW_TILT_MAX
+            * depth_fraction
+            * front_fraction
+            * lateral_fraction
+            * local_fraction
+        )
+        max_step = LOW_TILT_RATE * self.control_dt
+        self._tilt_angle += float(
+            np.clip(requested_angle - self._tilt_angle, -max_step, max_step)
+        )
+        if abs(self._tilt_angle) < np.deg2rad(0.05):
+            self._tilt_angle = 0.0
+        self._tilt_fraction = float(
+            np.clip(self._tilt_angle / LOW_TILT_MAX, 0.0, 1.0)
+        )
+        actual_rotation_vector = rotation_vector(
+            base_rotation @ self._home_base_rotation.T
+        )
+        actual_pitch = float(
+            actual_rotation_vector @ self._home_base_rotation[:, 1]
+        )
+        if requested_angle > np.deg2rad(0.10) or self._tilt_angle > 0.0:
+            self._tilt_recovering = True
+        elif self._tilt_recovering and abs(actual_pitch) < np.deg2rad(0.5):
+            self._tilt_recovering = False
+
+    def _safe_low_reach_drop(self) -> float:
+        """Return the collision-tested TCP drop released by current tilt."""
+        return float(
+            LOW_TILT_SAFE_DROP_LEVEL
+            + self._tilt_fraction
+            * (LOW_TILT_SAFE_DROP_FULL - LOW_TILT_SAFE_DROP_LEVEL)
+        )
+
     def _maybe_replan_arm(self) -> None:
         """Unwedge the arm-only servo from a local minimum.
 
@@ -635,6 +1108,10 @@ class B2WZ1WholeBodyController:
         forward /= max(float(np.linalg.norm(forward)), 1.0e-9)
         lateral = np.array([-forward[1], forward[0], 0.0], dtype=np.float64)
         vertical = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        self._base_participation = self._base_participation_score(
+            self.data.xpos[self._base_body_id],
+            base_rotation,
+        )
 
         for index, wheel_body_id in enumerate(self._wheel_body_ids):
             wheel_jacobian = self._body_jacobian(int(wheel_body_id))[:3]
@@ -661,6 +1138,7 @@ class B2WZ1WholeBodyController:
         )
         target_requires_driving = bool(
             np.any(np.abs(target_delta_home[:2]) > arm_allowance)
+            or self._base_participation > 0.05
         )
         home_yaw = float(
             np.arctan2(
@@ -713,8 +1191,8 @@ class B2WZ1WholeBodyController:
                     self._home_base_position[2]
                     + np.clip(
                         self.base_assist * target_delta_home[2],
-                        -0.04,
-                        0.04,
+                        BASE_HEIGHT_ASSIST_LOW,
+                        BASE_HEIGHT_ASSIST_HIGH,
                     )
                 )
             else:
@@ -747,8 +1225,8 @@ class B2WZ1WholeBodyController:
                     self._home_base_position[2]
                     + np.clip(
                         self.base_assist * target_delta_home[2],
-                        -0.04,
-                        0.04,
+                        BASE_HEIGHT_ASSIST_LOW,
+                        BASE_HEIGHT_ASSIST_HIGH,
                     )
                 )
         else:
@@ -758,8 +1236,8 @@ class B2WZ1WholeBodyController:
                     self.base_assist * retained_by_arm[1],
                     np.clip(
                         self.base_assist * target_delta_home[2],
-                        -0.04,
-                        0.04,
+                        BASE_HEIGHT_ASSIST_LOW,
+                        BASE_HEIGHT_ASSIST_HIGH,
                     ),
                 ],
                 dtype=np.float64,
@@ -769,6 +1247,76 @@ class B2WZ1WholeBodyController:
                 + self._home_base_rotation @ local_base_shift
             )
             self._desired_base_rotation[:] = self._home_base_rotation
+
+        self._update_low_tilt_assist(
+            target_delta_home,
+            self.data.xpos[self._base_body_id],
+            base_rotation,
+        )
+        tilt_assist_active = self._tilt_recovering
+        if tilt_assist_active:
+            tcp_position_error = float(
+                np.linalg.norm(self._target_position - self.tcp_position)
+            )
+            target_remains_low = bool(
+                -float(target_delta_home[2]) > LOW_TILT_START_DROP
+            )
+            if self._tilt_planar_hold:
+                if (
+                    tcp_position_error > LOW_TILT_HOLD_EXIT_ERROR
+                    or not target_remains_low
+                ):
+                    self._tilt_planar_hold = False
+            elif (
+                target_remains_low
+                and tcp_position_error < LOW_TILT_HOLD_ENTER_ERROR
+                and self._base_participation < 0.40
+            ):
+                # The TCP, rather than a redundant nominal parking pose, says
+                # when forward relocation is complete. Capture that wheel
+                # footprint and heading so the planner cannot keep creeping.
+                self._tilt_planar_hold = True
+                self._tilt_hold_base_position[:] = self.data.xpos[
+                    self._base_body_id
+                ]
+                current_yaw_for_hold = float(
+                    np.arctan2(base_rotation[1, 0], base_rotation[0, 0])
+                )
+                home_yaw_for_hold = float(
+                    np.arctan2(
+                        self._home_base_rotation[1, 0],
+                        self._home_base_rotation[0, 0],
+                    )
+                )
+                yaw_delta = self._wrap_angle(
+                    current_yaw_for_hold - home_yaw_for_hold
+                )
+                self._tilt_hold_heading_rotation[:] = (
+                    axis_angle_rotation(
+                        np.array([0.0, 0.0, 1.0], dtype=np.float64),
+                        yaw_delta,
+                    )
+                    @ self._home_base_rotation
+                )
+            if self._tilt_planar_hold:
+                self._desired_base_position[:2] = (
+                    self._tilt_hold_base_position[:2]
+                )
+                self._desired_base_rotation[:] = (
+                    self._tilt_hold_heading_rotation
+                )
+            # Positive rotation about the body's left axis sends its forward
+            # axis downward: front legs shorten while rear legs extend.
+            tilt_axis_world = self._desired_base_rotation[:, 1].copy()
+            self._desired_base_rotation[:] = (
+                axis_angle_rotation(tilt_axis_world, self._tilt_angle)
+                @ self._desired_base_rotation
+            )
+            # Rotate around a nominal-height body center rather than obtaining
+            # extra reach through an uncontrolled whole-body crouch.
+            self._desired_base_position[2] = self._home_base_position[2]
+        else:
+            self._tilt_planar_hold = False
 
         base_position = self.data.xpos[self._base_body_id]
         planar_base_error = self._desired_base_position[:2] - base_position[:2]
@@ -783,23 +1331,71 @@ class B2WZ1WholeBodyController:
         final_yaw_error = self._wrap_angle(desired_yaw - current_yaw)
 
         # ---- arm-first state machine (macro-micro) -----------------------
-        if self.arm_first:
+        coordinator_active = bool(
+            not tilt_assist_active
+            and self.auto_drive
+            and self._coordinator_command is not None
+            and self._coordinator_gate > 1.0e-3
+        )
+        if tilt_assist_active:
+            # Keep the wheels at their planar location but unlock the legs so
+            # the explicit base-pitch task can form a front-low/rear-high
+            # stance. This is posture assistance, not locomotion.
+            self.arm_only_active = False
+            self._arm_exit_counter = 0
+            self._arm_enter_counter = 0
+        elif coordinator_active:
+            # The analytic gate has declared that the base is needed.  Do not
+            # wait for the arm-only plateau detector before accepting the
+            # learned macro command.
+            self.arm_only_active = False
+            self._arm_exit_counter = 0
+            self._arm_enter_counter = 0
+        elif self.arm_first:
             arm_tcp_position_error = float(
                 np.linalg.norm(self._target_position - self.tcp_position)
+            )
+            tcp_error_base = base_rotation.T @ (
+                self._target_position - self.tcp_position
+            )
+            arm_tcp_planar_error = float(np.linalg.norm(tcp_error_base[:2]))
+            vertical_only_residual = bool(
+                arm_tcp_planar_error < 0.02
+                and abs(float(tcp_error_base[2])) > 0.02
             )
             arm_tcp_orientation_error = float(
                 np.linalg.norm(
                     rotation_vector(self._target_rotation @ self.tcp_rotation.T)
                 )
             )
-            if self.arm_only_active and self._replan_target is None:
+            if (
+                self.arm_only_active
+                and self._base_participation > 0.15
+                and arm_tcp_planar_error > ARM_FIRST_IMMEDIATE_EXIT_ERROR
+            ):
+                # A newly commanded target has left the comfortable arm
+                # workspace.  Release the base immediately instead of waiting
+                # for an avoidable arm-only tracking plateau. Only planar
+                # error can release a wheeled base; a vertical residual stays
+                # with the arm and its joint limits.
+                self.arm_only_active = False
+                self._arm_exit_counter = 0
+                self._arm_enter_counter = 0
+            elif self.arm_only_active and self._replan_target is None:
                 # Leave arm-only when the arm demonstrably cannot serve the
                 # target: position plateau at joint limits / outside the
                 # workspace, or a stall at the target position with the
                 # orientation stuck (the Z1 has a locked joint). Suspended
                 # while the stall-recovery fold is in flight.
+                base_can_help_position = bool(
+                    self._base_participation > 0.15
+                    or np.any(np.abs(target_delta_home[:2]) > arm_allowance)
+                )
                 arm_failed = bool(
-                    arm_tcp_position_error > ARM_FIRST_EXIT_ERROR
+                    (
+                        arm_tcp_planar_error > ARM_FIRST_EXIT_ERROR
+                        and base_can_help_position
+                    )
                     or (
                         arm_tcp_position_error < ARM_FIRST_STALL_POS
                         and arm_tcp_orientation_error > ARM_FIRST_STALL_ORI
@@ -814,15 +1410,33 @@ class B2WZ1WholeBodyController:
                     self._arm_exit_counter = 0
             else:
                 # Re-engage only once the arm IK can reach the target AND the
-                # base has settled, so the hand-off does not chatter.
-                if self._arm_can_reach():
+                # base has settled, so the hand-off does not chatter. A pure
+                # vertical residual is also handed to the arm: driving cannot
+                # reduce it, and the arm will stop safely at its joint limit.
+                arm_can_take_over = self._arm_can_reach() or vertical_only_residual
+                if self._base_participation < 0.05 and arm_can_take_over:
                     self._arm_enter_counter += 1
                 else:
                     self._arm_enter_counter = 0
-                base_settled = (
+                planned_base_settled = (
                     self._base_goal_distance < ARM_FIRST_BASE_SETTLE
                     and abs(final_yaw_error) < ARM_FIRST_BASE_SETTLE_YAW
                 )
+                # The nominal parking pose is only a guide, not a task-space
+                # requirement.  If the moving base has already brought the
+                # target into a comfortable, IK-feasible arm workspace, stop
+                # there instead of continuing to rotate toward a redundant
+                # parking yaw.  This hand-off is what removes slow orbiting
+                # around an already reached TCP target.
+                comfortably_reached = bool(
+                    self._base_participation < 0.05
+                    and (
+                        arm_tcp_position_error < 0.02
+                        or vertical_only_residual
+                    )
+                    and arm_tcp_orientation_error < 0.08
+                )
+                base_settled = planned_base_settled or comfortably_reached
                 if (
                     base_settled
                     and self._arm_enter_counter >= ARM_FIRST_ENTER_STEPS
@@ -835,7 +1449,9 @@ class B2WZ1WholeBodyController:
             self._desired_base_position[:] = base_position
             self._desired_base_rotation[:] = base_rotation
 
-        if self.auto_drive and not self.arm_only_active:
+        if coordinator_active:
+            self._mobile_base_active = True
+        elif self.auto_drive and not self.arm_only_active:
             if self._mobile_base_active:
                 self._mobile_base_active = bool(
                     self._base_goal_distance > 0.090
@@ -859,8 +1475,41 @@ class B2WZ1WholeBodyController:
                 forward,
                 base_rotation,
             )
+            if coordinator_active:
+                # Residual-on-analytic is intentionally safer than replacing
+                # the planner: a zero policy action is the original WBC, and
+                # PPO only learns small corrections when they improve it.
+                assert self._coordinator_command is not None
+                command = self._coordinator_gate * self._coordinator_command
+                desired_base_twist[:3] += command[0] * forward
+                desired_base_twist[2] = float(
+                    np.clip(
+                        2.0
+                        * (
+                            self._desired_base_position[2]
+                            + command[2]
+                            - base_position[2]
+                        ),
+                        -0.10,
+                        0.10,
+                    )
+                )
+                desired_base_twist[5] = float(
+                    np.clip(desired_base_twist[5] + command[1], -0.80, 0.80)
+                )
+            # Near the edge of the comfortable workspace the base joins
+            # gradually; clearly unreachable targets retain full authority.
+            drive_blend = max(
+                self._base_participation,
+                self._coordinator_gate if coordinator_active else 0.0,
+            )
+            desired_base_twist[[0, 1, 5]] *= 0.20 + 0.80 * drive_blend
             desired_base_twist[:3] *= self._speed_scale
             desired_base_twist[3:] *= self._rotation_speed_scale
+            if tilt_assist_active:
+                # Four-wheel driving remains available in the low posture,
+                # but is deliberately slower to preserve contact and pitch.
+                desired_base_twist[[0, 1, 5]] *= LOW_TILT_DRIVE_SCALE
             desired_base_twist -= BASE_VEL_DAMPING * self.data.qvel[:6]
             target_from_home_current = (
                 base_rotation.T @ (self._target_position - base_position)
@@ -875,9 +1524,12 @@ class B2WZ1WholeBodyController:
                     REVERSE_REACHABLE_DELTA_HIGH,
                 )
             else:
+                reachable_low = -0.14
+                if tilt_assist_active:
+                    reachable_low = -self._safe_low_reach_drop()
                 reachable_delta = np.clip(
                     target_from_home_current,
-                    np.array([-0.12, -0.10, -0.14], dtype=np.float64),
+                    np.array([-0.12, -0.10, reachable_low], dtype=np.float64),
                     np.array([0.16, 0.10, 0.14], dtype=np.float64),
                 )
             control_tcp_position = base_position + base_rotation @ (
@@ -923,53 +1575,73 @@ class B2WZ1WholeBodyController:
             desired_base_twist -= BASE_VEL_DAMPING * self.data.qvel[:6]
             control_tcp_position = self._target_position
             control_tcp_rotation = self._target_rotation
+
+        # Sequence the low reach safely: at level stance the arm may descend
+        # only to the collision-tested local floor; more depth is released as
+        # the nose-down posture becomes available. The visible/user target is
+        # unchanged, so any remaining error is reported honestly.
+        safe_vertical_drop = self._safe_low_reach_drop()
+        safe_tcp_z = self._home_tcp_position[2] - safe_vertical_drop
+        self._vertical_target_clamped = bool(
+            control_tcp_position[2] < safe_tcp_z - 1.0e-6
+        )
+        if self._vertical_target_clamped:
+            control_tcp_position = control_tcp_position.copy()
+            control_tcp_position[2] = safe_tcp_z
         task_jacobians.append(
             self._body_jacobian(self._base_body_id)[:, self._optimized_dofs]
         )
         task_velocities.append(desired_base_twist)
-        base_task_weights = (
-            np.array([30.0, 30.0, 18.0, 20.0, 20.0, 30.0])
-            if self._mobile_base_active
-            else np.array([6.0, 6.0, 12.0, 15.0, 15.0, 8.0])
+        base_hold_weights = np.array([6.0, 6.0, 12.0, 15.0, 15.0, 8.0])
+        # Once the target is outside the comfortable arm workspace, base
+        # motion must win over the arm's tendency to preserve the current
+        # posture.  Yaw gets the strongest authority because a wheeled base
+        # can only serve a lateral TCP target after turning into it; the arm
+        # simultaneously compensates that turn through the SE(3) TCP task.
+        base_drive_weights = np.array([42.0, 42.0, 24.0, 24.0, 24.0, 55.0])
+        base_weight_blend = (
+            self._base_participation if self._mobile_base_active else 0.0
         )
-        if self.arm_only_active:
-            # Hold the floating base (z, roll, pitch) against arm reactions.
+        if coordinator_active:
+            base_weight_blend = max(base_weight_blend, self._coordinator_gate)
+        base_task_weights = (
+            base_hold_weights
+            + base_weight_blend * (base_drive_weights - base_hold_weights)
+        )
+        if tilt_assist_active:
+            # Pitch and height are the safety-critical parts of the low-reach
+            # posture; x/y/yaw merely hold the current wheel footprint.
             base_task_weights = np.array(
-                [18.0, 18.0, 10.0, 14.0, 14.0, 20.0]
+                [28.0, 28.0, 42.0, 42.0, 60.0, 32.0]
+            )
+        elif self.arm_only_active:
+            # Hold the floating base against arm reactions after hand-off.
+            # A weak hold lets the wheeled body drift a few centimetres over
+            # long runs, which eventually makes an otherwise local target
+            # look unreachable again and restarts the mobile-base planner.
+            base_task_weights = np.array(
+                [45.0, 45.0, 35.0, 35.0, 35.0, 45.0]
             )
         task_weights.append(base_task_weights)
 
-        tcp_rotation = self.tcp_rotation
-        # Task-space PD: brake with the measured TCP velocity so the body
-        # does not oscillate through the target.
-        tcp_velocity = self._site_jacobian(self._tcp_site_id) @ self.data.qvel
-        desired_tcp_twist = np.concatenate(
-            [
-                np.clip(
-                    TCP_POS_GAIN * (control_tcp_position - self.tcp_position),
-                    -0.30,
-                    0.30,
-                ),
-                np.clip(
-                    TCP_ORI_GAIN
-                    * rotation_vector(control_tcp_rotation @ tcp_rotation.T),
-                    -0.60,
-                    0.60,
-                ),
-            ]
+        desired_tcp_twist = self._desired_tcp_twist(
+            control_tcp_position,
+            control_tcp_rotation,
         )
-        desired_tcp_twist[:3] *= self._speed_scale
-        desired_tcp_twist[3:] *= self._rotation_speed_scale
-        desired_tcp_twist -= TCP_VEL_DAMPING * tcp_velocity
         tcp_jacobian = self._site_jacobian(self._tcp_site_id)[
             :, self._optimized_dofs
         ].copy()
+        arm_columns = np.isin(self._optimized_dofs, self._arm_dof_adr)
+        # A wheel base can translate in the ground plane, not vertically.
+        # Allocate the TCP-z row exclusively to Z1 so an unreachable low
+        # target saturates safely at the arm limit instead of commanding the
+        # legs to lower the whole body indefinitely.
+        tcp_jacobian[2, ~arm_columns] = 0.0
         if self.arm_only_active:
             # Keep the 28-column layout for the stacked solve; zero out every
             # dof except the arm so the base cannot participate in the servo.
             # (_optimized_dofs is not sorted, so locate the arm columns by
             # matching true dof indices rather than by position.)
-            arm_columns = np.isin(self._optimized_dofs, self._arm_dof_adr)
             tcp_jacobian[:, ~arm_columns] = 0.0
         task_jacobians.append(tcp_jacobian)
         task_velocities.append(desired_tcp_twist)
@@ -978,6 +1650,13 @@ class B2WZ1WholeBodyController:
             # gets the strongest possible position+orientation weights.
             task_weights.append(
                 np.array([25.0, 25.0, 25.0, 12.0, 12.0, 12.0], dtype=np.float64)
+            )
+        elif tilt_assist_active:
+            # Low reach is position critical. Orientation remains controlled,
+            # but it must not force the elbow to fold back into the body while
+            # the legs are creating additional vertical workspace.
+            task_weights.append(
+                np.array([23.0, 23.0, 27.0, 7.0, 7.0, 7.0], dtype=np.float64)
             )
         elif reversing:
             # Position-first in reverse: folding the arm backward rotates the
@@ -1005,13 +1684,34 @@ class B2WZ1WholeBodyController:
             np.concatenate([WBC_STAND_LEG_NOMINAL, ARM_NOMINAL])
             - current_posture
         )
+        arm_width = np.maximum(
+            self._arm_joint_ranges[:, 1] - self._arm_joint_ranges[:, 0],
+            1.0e-6,
+        )
+        arm_margin = np.minimum(
+            current_posture[12:] - self._arm_joint_ranges[:, 0],
+            self._arm_joint_ranges[:, 1] - current_posture[12:],
+        ) / arm_width
+        arm_limit_weights = 0.2 + 2.8 * np.array(
+            [1.0 - smoothstep(0.04, 0.18, float(margin)) for margin in arm_margin],
+            dtype=np.float64,
+        )
+        if tilt_assist_active:
+            # The QP already enforces hard predictive joint bounds. During a
+            # low reach, soften only the comfort-centering term so Z1 may use
+            # the extra workspace created by the tilted body.
+            arm_limit_weights = 0.15 + 0.85 * (
+                (arm_limit_weights - 0.2) / 2.8
+            )
         if self._mobile_base_active:
             posture_velocity[:12] = 0.0
             posture_weights = np.concatenate(
-                [np.full(12, 12.0), np.full(6, 0.2)]
+                [np.full(12, 12.0), arm_limit_weights]
             )
         else:
-            posture_weights = np.full(18, 0.2, dtype=np.float64)
+            posture_weights = np.concatenate(
+                [np.full(12, 0.2), arm_limit_weights]
+            )
         if self.arm_only_active:
             # The arm posture rows would fight the TCP task on the same six
             # dofs; drop them (the TCP task fully determines the arm).
@@ -1024,26 +1724,19 @@ class B2WZ1WholeBodyController:
         weights = np.concatenate(task_weights)
         weighted_jacobian = weights[:, None] * jacobian
         weighted_velocity = weights * velocity
-        normal_matrix = (
-            weighted_jacobian.T @ weighted_jacobian
-            + 3.0e-2 * np.eye(28)
+        lower, upper = self._generalized_velocity_bounds()
+        generalized_velocity = solve_box_least_squares(
+            weighted_jacobian,
+            weighted_velocity,
+            lower,
+            upper,
+            damping=3.0e-2,
         )
-        generalized_velocity = np.linalg.solve(
-            normal_matrix,
-            weighted_jacobian.T @ weighted_velocity,
+        self._solver_residual = float(
+            np.linalg.norm(weighted_jacobian @ generalized_velocity - weighted_velocity)
+            / np.sqrt(max(weighted_velocity.size, 1))
         )
-        lower = np.array(
-            [-0.40] * 3
-            + [-1.0] * 3
-            + [-0.35] * 12
-            + [-8.0] * 4
-            + [-1.0] * 6,
-            dtype=np.float64,
-        )
-        lower[:3] *= self._speed_scale
-        lower[3:6] *= self._rotation_speed_scale
-        lower[6:] *= self._speed_scale
-        return np.clip(generalized_velocity, lower, -lower)
+        return generalized_velocity
 
     @staticmethod
     def _wrap_angle(angle: float) -> float:
@@ -1085,12 +1778,19 @@ class B2WZ1WholeBodyController:
                 )
             )
         else:
-            angular_velocity = float(np.clip(4.0 * final_yaw_error, -0.5, 0.5))
-            if abs(final_yaw_error) > 0.015:
-                angular_velocity = float(
-                    np.copysign(max(abs(angular_velocity), 0.25), final_yaw_error)
-                )
-            linear_speed = 0.0
+            # Proportional terminal motion replaces the old minimum yaw rate.
+            # A fixed 0.25 rad/s kick repeatedly crossed the goal and was a
+            # direct source of visible target-adjacent oscillation.
+            angular_velocity = float(
+                np.clip(3.0 * final_yaw_error, -0.30, 0.30)
+            )
+            if abs(final_yaw_error) < 0.005:
+                angular_velocity = 0.0
+            linear_speed = float(
+                np.clip(0.7 * longitudinal_error, -0.08, 0.08)
+            )
+            if distance < 0.015:
+                linear_speed = 0.0
 
         linear_velocity = linear_speed * forward
         linear_velocity[2] = float(
@@ -1166,18 +1866,26 @@ class B2WZ1WholeBodyController:
 
         torque = np.zeros(23, dtype=np.float64)
         torque[:12] = (
-            2.0 * LEG_KP * (self._joint_reference[:12] - leg_position)
-            - 6.0 * LEG_KD * leg_velocity
+            self._actuator_gain_scale
+            * (
+                2.0 * LEG_KP * (self._joint_reference[:12] - leg_position)
+                - 6.0 * LEG_KD * leg_velocity
+            )
         )
-        torque[12:16] = 5.0 * (
+        torque[12:16] = self._actuator_gain_scale * 5.0 * (
             self._wheel_velocity_target - wheel_velocity
         )
         torque[16:22] = (
-            ARM_KP_SCALE * ARM_KP * (self._joint_reference[12:] - arm_position)
-            - ARM_KD_SCALE * ARM_KD * arm_velocity
+            self._actuator_gain_scale
+            * (
+                ARM_KP_SCALE
+                * ARM_KP
+                * (self._joint_reference[12:] - arm_position)
+                - ARM_KD_SCALE * ARM_KD * arm_velocity
+            )
             + self.data.qfrc_bias[self._arm_dof_adr]
         )
-        torque[22] = (
+        torque[22] = self._actuator_gain_scale * (
             GRIPPER_KP * (self._gripper_target - gripper_position)
             - GRIPPER_KD * gripper_velocity
         )
@@ -1193,6 +1901,36 @@ class B2WZ1WholeBodyController:
 
     def diagnostics(self) -> WBCDiagnostics:
         base_rotation = self.data.xmat[self._base_body_id].reshape(3, 3)
+        tcp_error_base = base_rotation.T @ (
+            self._target_position - self.tcp_position
+        )
+        arm_position = self.data.qpos[self._arm_qpos_adr]
+        arm_width = np.maximum(
+            self._arm_joint_ranges[:, 1] - self._arm_joint_ranges[:, 0],
+            1.0e-6,
+        )
+        minimum_arm_margin = float(
+            np.min(
+                np.minimum(
+                    arm_position - self._arm_joint_ranges[:, 0],
+                    self._arm_joint_ranges[:, 1] - arm_position,
+                )
+                / arm_width
+            )
+        )
+        actual_tilt_angle = float(
+            rotation_vector(base_rotation @ self._home_base_rotation.T)
+            @ self._home_base_rotation[:, 1]
+        )
+        vertical_limited = bool(
+            self._vertical_target_clamped
+            or (
+                (self.arm_only_active or self._tilt_recovering)
+                and np.linalg.norm(tcp_error_base[:2]) < 0.08
+                and abs(float(tcp_error_base[2])) > 0.03
+                and minimum_arm_margin < 0.02
+            )
+        )
         return WBCDiagnostics(
             position_error=float(
                 np.linalg.norm(self._target_position - self.tcp_position)
@@ -1213,4 +1951,11 @@ class B2WZ1WholeBodyController:
             mobile_base_active=self._mobile_base_active,
             base_goal_distance=self._base_goal_distance,
             arm_only=self.arm_only_active,
+            coordinator_gate=self._coordinator_gate,
+            solver_residual=self._solver_residual,
+            base_participation=self._base_participation,
+            tcp_speed=self._tcp_speed,
+            vertical_limited=vertical_limited,
+            tilt_assist_active=self._tilt_recovering,
+            tilt_angle=actual_tilt_angle,
         )

@@ -64,7 +64,7 @@ wheelrl-train-door \
 scripts/train_ubuntu_4090.sh door
 ```
 
-The same launcher accepts `gripper`. Override its defaults with environment
+The same launcher accepts `gripper` and `coordinator`. Override its defaults with environment
 variables, for example:
 
 ```bash
@@ -86,6 +86,7 @@ normalization statistics together:
 ```text
 wheelrl-train-door --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
 wheelrl-train      --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
+wheelrl-train-hier --resume-model <model.zip> --resume-stats <vecnormalize.pkl> ...
 ```
 
 ### Sharing trained checkpoints (e.g. to the 4090 machine)
@@ -195,16 +196,39 @@ wheelrl-play-wbc \
 ```
 
 At 100 Hz the example solves wheel rolling constraints, floating-base motion
-and stabilization, TCP SE(3), and posture tasks in one weighted damped
-least-squares system. The resulting leg and arm velocities are integrated into
-references, while four wheel-velocity targets drive the nonholonomic base. All
-targets are tracked through the existing 500 Hz torque interface.
+and stabilization, TCP SE(3), and posture tasks in one bounded, damped
+least-squares QP. Joint-speed and predictive joint-position bounds are enforced
+inside the solve instead of clipping its result afterward. The resulting leg
+and arm velocities are integrated into references, while four wheel-velocity
+targets drive the nonholonomic base. All targets are tracked through the
+existing 500 Hz torque interface.
 
 Targets inside a conservative Z1 workspace envelope mainly use the arm, with
-limited leg/base help from `--base-assist` (default `0.25`). When a target
-exceeds that envelope, automatic drive turns and/or translates B2-W while Z1
+limited leg/base help from `--base-assist` (default `0.25`). Base participation
+increases smoothly near the workspace boundary, at an arm joint limit, or near
+a poor-manipulability pose. For a clearly unreachable target it starts in the
+first control update: automatic drive turns and/or translates B2-W while Z1
 simultaneously moves toward the reachable part of the same world-frame target.
-Use `--no-auto-drive` to disable this behavior.
+Once the TCP is IK-feasible and settled, control hands back to a strongly
+damped arm-only precision mode; the nominal base parking yaw is discarded so
+it cannot produce a slow limit cycle around the reached target. The browser and
+MuJoCo overlay show base participation and TCP speed. Use `--no-auto-drive` to
+disable automatic base motion.
+
+Vertical tracking is handled separately from planar driving. For a sufficiently
+low target in front, B2-W keeps its wheel footprint fixed and smoothly pitches
+forward by at most 14 degrees: the front legs shorten while the rear legs
+extend. This supplies useful low workspace without an uncontrolled whole-body
+crouch. The TCP is released downward progressively as the tilt develops, using
+a collision-tested local floor; targets below that floor remain visibly
+commanded but are projected to the nearest safe servo point. The browser shows
+`low-reach tilt` and its angle, or `vertical target limited` when even maximum
+tilt cannot serve the request. For a target that is both far and low, planar
+driving completes first and the low-reach tilt enters afterward. Once already
+tilted, forward TCP jogging keeps the pitch latched and permits slow four-wheel
+relocation inside the low workspace; it no longer stands up and lifts the TCP
+between successive forward commands. The planar base stops when TCP error, not
+a redundant nominal parking pose, says the relocation is complete.
 
 This remains a simulation controller rather than a robot-ready inverse-dynamics
 or force controller: friction-cone/contact-force optimization, collision-aware
@@ -283,6 +307,78 @@ wheelrl-train-track --timesteps 2000000 --n-envs 8 --device cpu \
 - The reward includes position and orientation tracking terms plus a
   multiplicative "sync gate" (a light reward-fusion step) so both pose parts
   must be satisfied together.
+
+## Learned base coordinator for TCP-pose WBC
+
+`wheelrl-train-hier` now trains a deliberately small policy around the
+analytic whole-body controller. Its action is:
+
+```text
+[base forward-velocity correction, base yaw-rate correction, base height offset]
+```
+
+The correction is added to the analytic base planner, so zero policy action is
+the original WBC rather than a stopped robot. The policy cannot translate or
+rotate the requested TCP pose. The exact panel
+pose remains the WBC target at all times. A smooth analytic reachability gate
+sets the learned action to zero for arm-local targets and activates it only
+outside the comfortable Z1 workspace, near joint limits/poor manipulability,
+or when the locked arm joint leaves a persistent orientation error. This is
+the intended macro/micro split: RL repositions B2-W; WBC supplies final TCP
+precision.
+
+The 78-value observation contains base velocities and gravity, leg/wheel/arm
+state, the target and TCP error in the base frame, six arm joint-limit
+margins, translational manipulability, WBC base-goal distance, gate state,
+wheel slip and the previous 3-D action. Reset randomization now really changes
+body mass/inertia, friction, damping, joint-servo gains, sensor noise and
+zero-to-two policy steps of command latency.
+
+Smoke-test the interface in WSL:
+
+```bash
+wheelrl-train-hier --stage local --timesteps 4096 --n-envs 1 \
+  --device cpu --randomization 0 --run-dir /tmp/wheelrl_coord_smoke
+```
+
+Recommended first curriculum run (standard MuJoCo physics remains CPU-side):
+
+```bash
+wheelrl-train-hier --stage curriculum --timesteps 4000000 \
+  --n-envs 8 --device cpu --randomization 0.75
+```
+
+On the native Ubuntu RTX 4090 clone, the same run is available through:
+
+```bash
+TIMESTEPS=4000000 N_ENVS=12 POLICY_DEVICE=cpu \
+  scripts/train_ubuntu_4090.sh coordinator
+```
+
+For this state-only MLP, benchmark `POLICY_DEVICE=cuda` rather than assuming it
+is faster: the GPU trains the small network but does not accelerate standard
+MuJoCo rigid-body simulation. Keep `final_model.zip` paired with its
+`vecnormalize.pkl`. Compare a trained policy against pure WBC using identical
+episode seeds and randomized dynamics:
+
+```bash
+wheelrl-eval-hier \
+  --model <RUN_DIR>/final_model.zip \
+  --stats <RUN_DIR>/vecnormalize.pkl \
+  --stage full --episodes 20 --randomization 1
+```
+
+Deploy it in the existing browser-controlled simulator:
+
+```bash
+wheelrl-play-wbc --controller hier \
+  --hier-model <RUN_DIR>/final_model.zip \
+  --hier-stats <RUN_DIR>/vecnormalize.pkl
+```
+
+Legacy hierarchical checkpoints output six TCP-residual actions and are
+intentionally rejected; otherwise they could reintroduce the steady-state
+pose offset this coordinator removes.
 
 ## Pull-door training
 

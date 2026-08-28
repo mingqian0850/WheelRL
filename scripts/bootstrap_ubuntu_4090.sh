@@ -27,7 +27,17 @@ nvidia-smi \
 .venv/bin/python - <<'PY'
 import sys
 
+import numpy as np
 import torch
+
+from wheelrl.envs.b2w_z1_hier import B2WZ1HierEnv
+
+env = B2WZ1HierEnv(randomization=0.0, max_episode_steps=2)
+observation, _ = env.reset(seed=0)
+observation, _, _, _, _ = env.step(np.zeros(3, dtype=np.float32))
+assert observation.shape == (78,)
+env.close()
+print("coordinator_env=ok action_shape=(3,) observation_shape=(78,)")
 
 print("torch=", torch.__version__)
 print("torch_cuda=", torch.version.cuda)

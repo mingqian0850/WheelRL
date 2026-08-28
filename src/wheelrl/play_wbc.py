@@ -29,6 +29,11 @@ JOG_STEPS = {
 
 def _print_pose(controller: B2WZ1WholeBodyController) -> None:
     diagnostics = controller.diagnostics()
+    arm_only = bool(getattr(diagnostics, "arm_only", False))
+    base_participation = float(getattr(diagnostics, "base_participation", 0.0))
+    tcp_speed = float(getattr(diagnostics, "tcp_speed", 0.0))
+    vertical_limited = bool(getattr(diagnostics, "vertical_limited", False))
+    tilt_angle = float(getattr(diagnostics, "tilt_angle", 0.0))
     position = " ".join(f"{value:+.4f}" for value in controller.tcp_position)
     target = " ".join(f"{value:+.4f}" for value in controller.target_position)
     print(
@@ -40,7 +45,11 @@ def _print_pose(controller: B2WZ1WholeBodyController) -> None:
         f"({controller.speed_scale:.2f}x/"
         f"{controller.rotation_speed_scale:.2f}x-rot) "
         f"auto_drive={'on' if diagnostics.mobile_base_active else 'off'} "
-        f"arm_only={'on' if diagnostics.arm_only else 'off'} "
+        f"arm_only={'on' if arm_only else 'off'} "
+        f"base_share={base_participation:.2f} "
+        f"tcp_speed={1000.0 * tcp_speed:.2f} mm/s "
+        f"vertical_limit={'on' if vertical_limited else 'off'} "
+        f"tilt={np.rad2deg(tilt_angle):.1f} deg "
         f"base_goal={diagnostics.base_goal_distance:.3f} m"
     )
 
@@ -133,6 +142,14 @@ def _apply_panel_command(
 
 def _panel_state(controller: B2WZ1WholeBodyController) -> dict[str, Any]:
     diagnostics = controller.diagnostics()
+    arm_only = bool(getattr(diagnostics, "arm_only", False))
+    base_participation = float(getattr(diagnostics, "base_participation", 0.0))
+    tcp_speed = float(getattr(diagnostics, "tcp_speed", 0.0))
+    vertical_limited = bool(getattr(diagnostics, "vertical_limited", False))
+    tilt_assist_active = bool(
+        getattr(diagnostics, "tilt_assist_active", False)
+    )
+    tilt_angle = float(getattr(diagnostics, "tilt_angle", 0.0))
     relative_rotation = controller.home_tcp_rotation.T @ controller.target_rotation
     return {
         "position_offset": (
@@ -146,6 +163,12 @@ def _panel_state(controller: B2WZ1WholeBodyController) -> dict[str, Any]:
             np.rad2deg(diagnostics.orientation_error)
         ),
         "mobile_base_active": diagnostics.mobile_base_active,
+        "arm_only": arm_only,
+        "base_participation": base_participation,
+        "tcp_speed_mm_s": 1000.0 * tcp_speed,
+        "vertical_limited": vertical_limited,
+        "tilt_assist_active": tilt_assist_active,
+        "tilt_angle_deg": float(np.rad2deg(tilt_angle)),
         "base_goal_distance": diagnostics.base_goal_distance,
         "gripper_closed": controller.gripper_closed,
         "auto_drive": controller.auto_drive,
@@ -165,11 +188,31 @@ def _viewer_overlay(
     called only after releasing viewer.lock().
     """
     diagnostics = controller.diagnostics()
+    base_participation = float(getattr(diagnostics, "base_participation", 0.0))
+    tcp_speed = float(getattr(diagnostics, "tcp_speed", 0.0))
+    vertical_limited = bool(getattr(diagnostics, "vertical_limited", False))
+    tilt_assist_active = bool(
+        getattr(diagnostics, "tilt_assist_active", False)
+    )
+    tilt_angle = float(getattr(diagnostics, "tilt_angle", 0.0))
     lines = [
         f"TCP error  {diagnostics.position_error:.4f} m",
         f"Rotation   {np.rad2deg(diagnostics.orientation_error):.2f} deg",
         "Base       "
-        + ("moving" if diagnostics.mobile_base_active else "arm workspace"),
+        + (
+            "vertical target limited"
+            if vertical_limited
+            else (
+                ("tilted drive " if diagnostics.mobile_base_active else "low-reach tilt ")
+                + f"{np.rad2deg(tilt_angle):.1f} deg"
+                if tilt_assist_active
+                else (
+                    "moving" if diagnostics.mobile_base_active else "arm workspace"
+                )
+            )
+        ),
+        f"Allocation {100.0 * base_participation:5.1f}% base · "
+        f"{1000.0 * tcp_speed:.1f} mm/s TCP",
         "Gripper    " + ("closed" if controller.gripper_closed else "open"),
         f"Speed      {controller.speed_profile} "
         f"({controller.speed_scale:.2f}x, "
@@ -278,7 +321,7 @@ def main() -> None:
         default="wbc",
         help="controller backend: velocity-level WBC (default), inverse-"
         "dynamics MPC (slower, experimental), or hierarchical "
-        "RL-targets-over-WBC-servo (needs --hier-model/--hier-stats)",
+        "RL-base-coordination-over-WBC (needs --hier-model/--hier-stats)",
     )
     parser.add_argument("--hier-model", type=Path)
     parser.add_argument("--hier-stats", type=Path)
@@ -286,10 +329,8 @@ def main() -> None:
         "--hier-residual-scale",
         type=float,
         default=1.0,
-        help="scales the RL residual before it shifts the WBC servo target "
-        "(default 1.0 = trained behavior with its ~25 mm steady-state "
-        "offset; 0.0 = servo the panel command directly, WBC-level "
-        "precision ~0.3 mm / 0.01 deg)",
+        help="legacy option name: scales the learned base coordinator "
+        "(default 1.0; 0.0 = pure analytic WBC)",
     )
     parser.add_argument(
         "--arm-first",
@@ -298,7 +339,7 @@ def main() -> None:
         default=None,
         help="macro-micro mode: the arm alone serves the TCP and the base is "
         "locked whenever the arm can reach; the base drives only when it "
-        "cannot. Default on for --controller wbc, off for hier.",
+        "cannot. Default on for WBC and the new hierarchical coordinator.",
     )
     parser.add_argument(
         "--no-arm-first",
@@ -336,16 +377,16 @@ def main() -> None:
             stats_path=args.hier_stats,
             auto_drive=not args.no_auto_drive,
             residual_scale=args.hier_residual_scale,
-            arm_first=False if args.arm_first is None else args.arm_first,
+            arm_first=True if args.arm_first is None else args.arm_first,
         )
         # The hier env already settles 0.3 s and captures the reference.
         args.settle_seconds = 0.0
         print(
-            "Hierarchical controller: RL residual targets over the 100 Hz "
-            "WBC servo. Commanded pose from the panel; precision from the WBC. "
-            f"Residual scale: {args.hier_residual_scale:g} "
+            "Hierarchical controller: learned base coordination over the "
+            "100 Hz WBC. The panel TCP pose remains the exact target. "
+            f"Coordinator scale: {args.hier_residual_scale:g} "
             "(0 = pure WBC precision). "
-            f"Arm-first: {False if args.arm_first is None else args.arm_first}."
+            f"Arm-first: {True if args.arm_first is None else args.arm_first}."
         )
     elif args.controller == "mpc":
         # casadi/pinocchio live in the separate 'wheelrl-mpc' environment;

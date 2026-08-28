@@ -28,6 +28,7 @@ dev = [
 wheelrl-check = "wheelrl.check_env:main"
 wheelrl-check-door = "wheelrl.check_door:main"
 wheelrl-eval-door = "wheelrl.eval_door:main"
+wheelrl-eval-hier = "wheelrl.eval_hier:main"
 wheelrl-play = "wheelrl.play:main"
 wheelrl-play-door = "wheelrl.play_door:main"
 wheelrl-play-wbc = "wheelrl.play_wbc:main"

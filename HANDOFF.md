@@ -19,16 +19,38 @@ controller.
 
 - WSL repository: `/home/chenm/WheelRL`
 - Remote: `https://github.com/mingqian0850/WheelRL.git`
-- Working branch: `backup/vbc-vision-hybrid-tcp-20260829`
-- Branch point: `a546616` (`ubuntu-4090-training`)
+- Working branch: `feature/traditional-compliant-door-control`
+- Branch point: `ba6bc23` (`backup/vbc-vision-hybrid-tcp-20260829`)
 - Preserved VBC/camera content commit: `555ada3`
 - The handoff itself is committed after `555ada3`; use the branch HEAD rather
   than expecting this document to contain its own commit hash.
-- This branch is a backup/experimental branch. It has not been merged into
-  `ubuntu-4090-training`.
+- This feature branch is based on the preserved VBC/high-precision handoff
+  branch. It has not been merged into `ubuntu-4090-training`.
 
 At the time this handoff was written, the branch contained no unrelated user
 changes. Always run `git status --short --branch` before editing.
+
+### Traditional pull-door baseline (current feature branch)
+
+The current branch adds a non-RL baseline in
+`src/wheelrl/traditional_door.py`. It uses the general MuJoCo-native `mink`
+Python library for arm-only TCP pose IK, with every non-Z1 DoF frozen as an
+exact QP constraint. A state machine approaches the handle, closes the
+gripper, rotates the lever, detects latch release, lowers Z1 stiffness, and
+then commands B2-W to reverse and yaw with the door angle.
+
+Use:
+
+```bash
+wheelrl-play-door-traditional
+wheelrl-play-door-traditional --headless --no-realtime
+```
+
+The nominal headless episode opens the door to about -0.721 rad in 19.35
+simulated seconds. Ten seeds at each door-randomization strength 0.0, 0.5, and
+1.0 completed successfully during implementation. The grasp remains a soft
+idealized MuJoCo equality and is not yet a real-gripper validation. Details and
+limitations are in `docs/TRADITIONAL_DOOR_CONTROLLER.md`.
 
 ## Completed work
 

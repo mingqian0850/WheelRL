@@ -259,6 +259,27 @@ View the robot at the pull door:
 wheelrl-play-door --stage turn --seconds 30
 ```
 
+Run the deterministic traditional-control baseline that performs the complete
+door sequence with Mink IK, gravity-compensated Z1 control, compliant pulling,
+and B2-W door-arc following:
+
+```bash
+wheelrl-play-door-traditional
+```
+
+Fast headless verification:
+
+```bash
+wheelrl-play-door-traditional --headless --no-realtime
+```
+
+The base remains stopped through approach, grasp, and lever rotation. Only
+after the handle crosses the latch-release angle does Z1 switch to a low
+stiffness connection and B2-W reverse while yawing with the door angle. See
+[`docs/TRADITIONAL_DOOR_CONTROLLER.md`](docs/TRADITIONAL_DOOR_CONTROLLER.md)
+for the controller phases, Mink constraints, measured baseline, tuning, and
+remaining sim-to-real limitations.
+
 The viewer uses WSLg. If no window appears, verify that `echo $DISPLAY` is
 non-empty and that GUI applications work in the same WSL session.
 

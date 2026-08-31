@@ -11,7 +11,8 @@ requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
 dependencies = [
   "gymnasium>=1.2,<2",
-  "mujoco>=3.3.6,<4",
+  "mink>=1.3,<2",
+  "mujoco>=3.10,<4",
   "numpy>=1.26,<3",
   "psutil>=7",
   "stable-baselines3[extra]>=2.8,<3",
@@ -31,6 +32,7 @@ wheelrl-eval-door = "wheelrl.eval_door:main"
 wheelrl-eval-hier = "wheelrl.eval_hier:main"
 wheelrl-play = "wheelrl.play:main"
 wheelrl-play-door = "wheelrl.play_door:main"
+wheelrl-play-door-traditional = "wheelrl.play_door_traditional:main"
 wheelrl-play-wbc = "wheelrl.play_wbc:main"
 wheelrl-play-track = "wheelrl.play_track:main"
 wheelrl-train = "wheelrl.train:main"

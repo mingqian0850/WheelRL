@@ -28,6 +28,20 @@
     <geom name="floor" type="plane" size="0 0 0.05" material="door_groundplane"
       friction="0.9 0.02 0.001"/>
 
+    <!-- Pose marker used by the traditional Mink IK controller. -->
+    <body name="tcp_target" mocap="true" pos="1.0 -0.6 1.18">
+      <geom type="sphere" size="0.022" rgba="1 0.85 0.1 0.75"
+        contype="0" conaffinity="0"/>
+      <geom type="cylinder" size="0.006 0.045" pos="0.045 0 0"
+        euler="0 1.570796327 0" rgba="0.95 0.15 0.15 0.9"
+        contype="0" conaffinity="0"/>
+      <geom type="cylinder" size="0.006 0.045" pos="0 0.045 0"
+        euler="-1.570796327 0 0" rgba="0.15 0.95 0.15 0.9"
+        contype="0" conaffinity="0"/>
+      <geom type="cylinder" size="0.006 0.045" pos="0 0 0.045"
+        rgba="0.15 0.35 1 0.9" contype="0" conaffinity="0"/>
+    </body>
+
     <!-- The robot begins on the negative-x side and pulls the door toward itself. -->
     <body name="door_frame" pos="1.10 0.65 0">
       <geom name="door_frame_hinge_post" type="box" pos="0.12 0 1.05"

@@ -1,6 +1,6 @@
 # WheelRL handoff
 
-Last updated: 2026-08-31 (Europe/Berlin)
+Last updated: 2026-09-02 (Europe/Berlin)
 
 ## User objective
 
@@ -26,6 +26,12 @@ controller.
   than expecting this document to contain its own commit hash.
 - This feature branch is based on the preserved VBC/high-precision handoff
   branch. It has not been merged into `ubuntu-4090-training`.
+
+The next native-Ubuntu task should branch from the current remote head as
+`feature/isaac-lab-tcp-tracker`, not from `ubuntu-4090-training`. Its complete
+environment, method, asset-validation and acceptance-test contract is in:
+
+- `docs/research/ISAACLAB_TCP_TRACKING_HANDOFF_2026-09-02.md`
 
 At the time this handoff was written, the branch contained no unrelated user
 changes. Always run `git status --short --branch` before editing.
@@ -173,6 +179,24 @@ anti-windup for any near-target integral term.
 Hard WBC constraints should ultimately cover joint/torque/velocity limits,
 wheel rolling and no-lateral-slip, ground contact/friction, self/body/ground
 collision, base attitude/height safety, and a defined infeasibility fallback.
+
+### Learning-method decision added 2026-09-02
+
+Use MLM as the reference for short-horizon six-DoF TCP trajectories, recent
+state history, future reference and curriculum learning. Use Deep Whole-Body
+Control as a code-level reference for unified body/arm representations,
+posture coordination, separate action heads and optional Advantage Mixing.
+
+Do not directly reproduce either policy. MLM has no official implementation or
+checkpoint available as of this date. Deep Whole-Body Control has code, but its
+released default is predominantly position-only, its horizontal TCP target
+follows the base, and base velocity is commanded separately. None of those
+choices alone solves WheelRL's fixed world-target relocation requirement.
+
+For the first Isaac Lab experiment, train a slow reachability/posture
+coordinator around a frozen deterministic SE(3) servo. Treat a direct unified
+joint policy as an ablation. Keep free-space tracking separate from the
+grasp/turn/pull contact controller.
 
 The complete design and acceptance criteria are in:
 

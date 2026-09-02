@@ -2,6 +2,11 @@
 
 这是一份可复现的研究快照，记录当前 WheelRL 的实现、已经观察到的问题、与公开工作的差距，以及下一阶段 B2+Z1 / B2-W+Z1 开门研究的推荐路线。
 
+> **2026-09-02 addendum:** MLM 与 Deep Whole-Body Control 的代码级核验、
+> 最终取舍和实验机交接要求见
+> [`ISAACLAB_TCP_TRACKING_HANDOFF_2026-09-02.md`](ISAACLAB_TCP_TRACKING_HANDOFF_2026-09-02.md)。
+> 本文的分支/提交字段保留为 2026-08-28 的历史快照。
+
 ## 一页结论
 
 1. **先做足式 B2+Z1 是合理的，而且现在有了很强的公开基线。** 足式版本去掉轮地非完整约束和“轮子移动/腿部姿态/机械臂”三者同时分配的难题，可以先把 6D TCP tracking、身体姿态分配、接触顺应和门任务状态机做正确。
@@ -126,7 +131,8 @@
 |---|---|---|---|---|
 | [RFM WQM pose tracking](https://arxiv.org/abs/2412.03012) | RA-L 2025 | 世界坐标 6D EE pose、非线性 reward fusion、teacher-student | 与 B2-W+Z1 的目标最接近；说明统一 pose policy 可行 | 未找到控制器代码 |
 | [Multi-Critic Twist Tracking](https://proceedings.mlr.press/v305/vijayan25a.html) | CoRL 2025 | EE twist；locomotion/manipulation 分离 critic | **最直接针对慢追踪和目标附近震荡**；让轨迹速度成为受控变量 | 未找到代码 |
-| [Deep Whole-Body Control](https://proceedings.mlr.press/v205/fu23a.html) | CoRL 2022 | unified policy、advantage mixing、online adaptation | 统一策略基准；更适合作为历史/消融对照 | [代码](https://github.com/MarkFzp/Deep-Whole-Body-Control) |
+| [MLM](https://arxiv.org/abs/2508.10538) | RA-L 2026 / arXiv 2025 | 短时域 6D TCP 轨迹、history/future prediction、adaptive task sampling | 连续轨迹与遥操作参考最强；门规划轨迹已知时先跳过预测器 | 截至 2026-09-02 未找到官方代码/数据 |
+| [Deep Whole-Body Control](https://proceedings.mlr.press/v205/fu23a.html) | CoRL 2022 | unified policy、advantage mixing、online adaptation | **身体升降/倾斜协调参考**；底盘速度需另给，公开默认配置主要是 3D 位置 tracking | [参考代码](https://github.com/MarkFzp/Deep-Whole-Body-Control)；无 checkpoint |
 | [RoboDuet](https://arxiv.org/abs/2403.17367) | RA-L 2025 | 两个相互作用的 locomotion/manipulation policy | 比完全统一 actor 更容易处理两个目标冲突 | [代码](https://github.com/locomanip-duet/RoboDuet) |
 | [LeggedManip Lab](https://github.com/zzzJie-Robot/LeggedManip_Lab) | 软件项目 | mixed-frame EE pose + base velocity，RSL-RL PPO | **B2+Z1 足式 RL 最快起点**；需要再加 world-frame coordinator | Apache-2.0 |
 

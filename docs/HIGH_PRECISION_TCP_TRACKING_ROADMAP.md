@@ -1,6 +1,6 @@
 # High-precision TCP tracking roadmap
 
-Date: 2026-08-29
+Date: 2026-09-02
 
 This document preserves the current Visual Whole-Body Control (VBC)-inspired
 scheme as a reproducible baseline and records the preferred direction for
@@ -145,6 +145,113 @@ settling, minimum collision distance, manipulability, QP infeasibility rate,
 wheel slip, and base attitude. Real-robot tolerances can be relaxed only after
 measuring calibration and perception uncertainty independently from control
 error.
+
+## Precision during whole-body motion
+
+Arm repeatability must not be confused with mobile world-frame TCP accuracy.
+The approximate error budget is:
+
+```text
+world TCP error
+    = base pose/state-estimation error
+    + arm tracking error
+    + mount, joint-zero, and TCP calibration error
+    + structural compliance and payload deflection
+    + sensing, network, and control latency
+    + target perception and hand-eye calibration error
+```
+
+At 0.7 m reach, one degree of uncorrected base attitude error produces about
+12 mm of translational TCP error. The Z1 manufacturer quotes approximately
+0.1 mm repeatability but explicitly notes that accuracy depends on test
+conditions and that insufficiently optimized position control can produce
+large error and shaking because whole-arm stiffness is low. That repeatability
+number is therefore not a whole-body tracking guarantee.
+
+Use these as planning ranges until a B2/B2-W + Z1 benchmark replaces them with
+measurements:
+
+| Operating mode | Simulation RMS target | Real-hardware RMS estimate |
+|---|---:|---:|
+| Standing, arm motion only | 3-8 mm, 1-2 deg | 5-15 mm, 1-3 deg |
+| Slow coordinated walking | 10-25 mm, 2-5 deg | 20-50 mm, 3-8 deg |
+| Contact transition, slip, fast gait, or difficult reach | 20-50 mm transient | 50-100+ mm transient |
+
+The current acceptance target of 15 mm / 7 degrees for simulated relocation is
+ambitious but reasonable for a slow, coordinated controller. It is not a claim
+about the current LeggedManip checkpoint or future hardware performance.
+
+Door manipulation should use explicit accuracy phases:
+
+1. transit with a loose tracking envelope;
+2. approach below roughly 0.1-0.15 m/s base speed;
+3. stop and require a measured 0.3-1.0 s stable window;
+4. execute the last 10-20 mm arm-dominant motion at roughly 20-50 mm/s;
+5. switch to 5-20 mm/s Cartesian impedance/admittance motion after contact;
+6. permit only slow base creep while regulating handle force and tension.
+
+This `move -> settle -> grasp -> compliant pull` sequence is preferable to
+rigid high-gain world-pose tracking while trotting.
+
+References:
+
+- Unitree Z1 specifications: <https://www.unitree.com/mobile/z1/>
+- Multi-critic whole-body end-effector tracking experiments:
+  <https://arxiv.org/html/2507.08656>
+- B2 + Z1 whole-body inverse-dynamics MPC:
+  <https://arxiv.org/html/2511.19709>
+
+## Isaac Lab training and randomization curriculum
+
+Register a separate `B2-Z1-TCP` task rather than changing the upstream
+`B2-Z1-WBC` baseline. Use world-frame FK-derived goals, desired TCP twist, and
+a low-dimensional learned coordinator around a frozen GPU-batched DIK/OSC or
+constrained WBC. For footed B2 the macro action is
+`[vx, vy, yaw_rate, body_height, body_pitch]`; omit `vy` for B2-W. Never sample
+an unrelated base-velocity objective.
+
+Promote training using held-out tracking metrics rather than PPO reward alone:
+
+| Stage | Distribution | Promotion evidence |
+|---|---|---|
+| 0. Lower-controller validation | Nominal plane; no RL, noise, delay, payload, or pushes | Stable local SE(3) tracking with no invalid state |
+| 1. Static coordination | FK-derived static goals; mostly local plus small ghost-base displacement | >95% held success and >99% survival |
+| 2. Moving goals | Minimum-jerk/spline pose and twist; speed raised gradually | Moving RMS and P95 pass on unseen seeds |
+| 3. Relocation | Increase ghost-base translation/yaw and orientation diversity | Relocation passes without unnecessary base motion |
+| 4. Mild DR | Flat ground; small dynamics, sensing, and delay uncertainty | >90% success; nominal regression below 15% |
+| 5. Measured DR | Payload/COM, deployment uncertainty, latency, modest pushes | Three or more seeds; saturation below 1% of steps |
+| 6. Terrain | Plane, friction patches, millimetre roughness, then mild slopes | Terrain passes while flat regression stays below 15% |
+| 7. Frozen evaluation | Held-out goals, seeds, parameter corners, and stress cases | Select by complete metric matrix, not reward |
+
+Suggested initial randomization ranges are deliberately narrower than the
+current upstream defaults:
+
+| Parameter | Mild | Full starting envelope |
+|---|---:|---:|
+| Floor friction | 0.7-1.1 | about 0.4-1.2, then replace with measurements |
+| Link mass | +/-5% | +/-10% |
+| Inertia | +/-5% | +/-15% |
+| Base COM | +/-1 cm XY | up to +/-3 cm XY |
+| Motor/PD gains | +/-10% | +/-20% |
+| Actuator delay | 0-10 ms | 0-20 ms |
+| Joint position noise | +/-0.005 rad | +/-0.01 rad |
+| Joint velocity noise | +/-0.2 rad/s | +/-0.5 rad/s |
+| Estimated TCP noise | +/-2 mm, +/-0.5 deg | +/-5 mm, +/-1 deg |
+| Payload | none | ramp through measured mass, COM, and inertia |
+| Pushes | none | modest horizontal disturbances, added last |
+
+Keep approximately 20% of environments nominal during full randomization to
+anchor precision. Do not assume wider randomization is better; replace these
+provisional envelopes with distributions measured from the real platform and
+avoid counting the same actuator/pipeline latency twice.
+
+For an indoor door deployment, the final terrain mixture should remain mostly
+flat: approximately 70% perfect plane, 20% low height variation starting near
++/-5 mm and capped near +/-10 mm, and 10% slopes up to about +/-3 degrees.
+Avoid stairs and rubble unless they match deployment. Add a terrain height
+scanner before training on geometry larger than roughly 1-2 cm. Visual texture
+and lighting augmentation matters only after camera observations enter the
+actor.
 
 ## Implementation order
 

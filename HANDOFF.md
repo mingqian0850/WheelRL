@@ -1,6 +1,6 @@
 # WheelRL handoff
 
-Last updated: 2026-08-31 (Europe/Berlin)
+Last updated: 2026-09-02 (Europe/Berlin)
 
 ## User objective
 
@@ -380,6 +380,69 @@ Preserve the upstream `B2-Z1-WBC` baseline and register a new task, provisionall
 `B2-Z1-TCP`, for this design. That task does **not** exist yet. Its observation
 and action interface will differ from the current `210 -> 18` policy, so the
 MuJoCo deploy runner must be updated alongside it.
+
+### Agreed randomization and terrain curriculum
+
+Do not inherit the upstream task's full randomization during initial controller
+development. The current LeggedManip base configuration applies friction
+`0.5-1.2`, all-body mass scaling `0.9-1.1`, base COM shifts up to 5 cm, and
+gain/inertia scaling up to +/-20% from startup; its delayed actuators can also
+add 0-20 ms. This is too much uncertainty for diagnosing a new precision task.
+
+Use a performance-gated curriculum instead:
+
+1. nominal flat plane, no observation corruption, delay, payload, or pushes;
+2. stationary FK-derived targets, followed by smooth six-DoF trajectories;
+3. ghost-base displacement that requires whole-body relocation;
+4. mild flat-ground randomization: roughly +/-5% mass/inertia, +/-1 cm COM,
+   +/-10% gains, small measured sensor noise, and 0-10 ms delay;
+5. measured deployment randomization: roughly +/-10% mass, +/-15% inertia,
+   +/-3 cm COM, +/-20% gains, payload mass/COM, and 0-20 ms delay;
+6. modest pushes last, after randomized-flat tracking passes;
+7. deployment-matched terrain only after the preceding stages pass.
+
+Keep about 20% nominal environments during the full-randomization stage to
+anchor precision. For an indoor door task, a suitable final terrain mixture is
+approximately 70% plane, 20% low height variation (start at +/-5 mm and cap
+near +/-10 mm), and 10% slopes up to about +/-3 degrees. Do not train on
+stairs or rubble unless the intended deployment requires them. Texture and
+lighting augmentation are irrelevant to the state-only controller and should
+be added only when camera observations enter the actor.
+
+### Expected precision while the base moves
+
+The Z1's advertised approximately 0.1 mm repeatability is not mobile,
+world-frame TCP accuracy. Base-state error, foot impact and slip, mount/TCP
+calibration, arm compliance, payload deflection, latency, and target perception
+dominate once the quadruped moves. A one-degree base-attitude error at 0.7 m
+reach alone creates about 12 mm of TCP displacement.
+
+The following are defensible engineering ranges, not demonstrated guarantees
+for the current policy:
+
+| Mode | Simulation RMS target | Real-hardware RMS estimate |
+|---|---:|---:|
+| Standing, arm motion only | 3-8 mm, 1-2 deg | 5-15 mm, 1-3 deg |
+| Slow coordinated walking | 10-25 mm, 2-5 deg | 20-50 mm, 3-8 deg |
+| Touchdown, slip, fast gait, or payload transients | 20-50 mm | 50-100+ mm |
+
+For the door task, use `transit -> slow approach -> settle -> precise grasp ->
+compliant pull`, rather than trying to hold millimetre accuracy while trotting.
+Slow the base below roughly 0.1-0.15 m/s during approach, settle for a measured
+0.3-1.0 s stable window, execute the final 10-20 mm arm-dominant alignment at
+no more than about 20-50 mm/s, and use Cartesian impedance/admittance at about
+5-20 mm/s after contact. These values are starting points to validate, not
+hard-coded universal limits.
+
+Supporting references:
+
+- Unitree Z1 specifications and stiffness caveat:
+  <https://www.unitree.com/mobile/z1/>
+- Whole-body end-effector tracking results on another quadruped-manipulator:
+  <https://arxiv.org/html/2507.08656>
+- Exact B2 + Z1 inverse-dynamics MPC work, which demonstrates coordinated
+  tracking but does not publish a TCP RMSE:
+  <https://arxiv.org/html/2511.19709>
 
 ## Door-control requirement
 
